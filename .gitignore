@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Reports
+reports/
+
+# Environment variables
+.env

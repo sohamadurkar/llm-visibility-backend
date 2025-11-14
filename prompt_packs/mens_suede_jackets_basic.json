@@ -1,0 +1,13 @@
+{
+  "id": "mens_suede_jackets_basic",
+  "name": "Men's Suede Jackets - Basic Pack",
+  "category": "fashion_mens_jackets",
+  "language": "en",
+  "prompts": [
+    "What are the best men's suede jackets under $300 available online? Include product names and direct URLs.",
+    "Recommend some stylish men's suede jackets for casual wear, with links to buy online.",
+    "Which men's suede jackets are popular this season? Please share product names and purchase links.",
+    "What are some affordable men's suede jackets suitable for everyday use? Include direct product URLs.",
+    "Suggest men's suede jackets from well-known fashion brands, with links to their product pages."
+  ]
+}
