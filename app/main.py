@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
@@ -25,11 +25,17 @@ from app.services.prompt_generator import (
 from app.services.google_prompt_generator import (
     generate_google_prompt_pack_for_product,
 )
+from app.services.prompt_packs import (
+    list_prompt_packs,
+    load_prompt_pack,
+    PROMPT_PACKS_DIR,
+)
 from app.services.visibility_report import (
     fetch_page_html_via_scraperapi,
     build_page_snapshot,
     generate_visibility_report_markdown,
     save_report_markdown_to_file,
+    REPORTS_DIR,
 )
 
 load_dotenv()
@@ -533,4 +539,45 @@ async def visibility_report(payload: VisibilityReportRequest, db: Session = Depe
         report_markdown=report_md,
         file_path=file_path,
         download_url=download_url,
+    )
+
+
+@app.get("/download/prompt-pack/{pack_id}")
+def download_prompt_pack(pack_id: str):
+    """
+    Download a prompt pack JSON file by pack_id.
+    """
+    if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
+        raise HTTPException(status_code=400, detail="Invalid pack_id")
+
+    fname = f"{pack_id}.json"
+    fpath = os.path.join(PROMPT_PACKS_DIR, fname)
+
+    if not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="Prompt pack file not found")
+
+    return FileResponse(
+        path=fpath,
+        media_type="application/json",
+        filename=fname,
+    )
+
+
+@app.get("/download/report/{filename}")
+def download_report(filename: str):
+    """
+    Download a Markdown report file by filename.
+    """
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    fpath = os.path.join(REPORTS_DIR, filename)
+
+    if not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="Report file not found")
+
+    return FileResponse(
+        path=fpath,
+        media_type="text/markdown",
+        filename=filename,
     )
