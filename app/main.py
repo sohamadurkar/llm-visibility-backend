@@ -47,7 +47,7 @@ app = FastAPI(title="LLM Visibility API", version="0.4.0")
 origins = [
     "http://localhost:5173",  # Vite dev
     "https://llm-visibility-production.up.railway.app",  # backend itself if needed
-    # add your future dashboard prod URL here when you deploy it (e.g. Netlify/Vercel)
+    "https://llm-visibility-frontend-production.up.railway.app",
 ]
 
 app.add_middleware(
