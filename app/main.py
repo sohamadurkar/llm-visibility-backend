@@ -1,6 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
@@ -14,18 +13,22 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 from app.db.engine import Base, engine, SessionLocal
-from app.models.models import Website, Product, PromptPack, Prompt
+from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
 
 from app.services.llm_checker import run_llm_visibility_check
-from app.services.prompt_packs import list_prompt_packs, load_prompt_pack, PROMPT_PACKS_DIR
+from app.services.prompt_packs import list_prompt_packs, load_prompt_pack
 from app.services.prompt_generator import (
     generate_prompt_pack_for_product,
     save_prompt_pack_to_file,
-    persist_pack_and_prompts,
 )
 from app.services.google_prompt_generator import (
     generate_google_prompt_pack_for_product,
+)
+from app.services.prompt_packs import (
+    list_prompt_packs,
+    load_prompt_pack,
+    PROMPT_PACKS_DIR,
 )
 from app.services.visibility_report import (
     fetch_page_html_via_scraperapi,
@@ -37,22 +40,7 @@ from app.services.visibility_report import (
 
 load_dotenv()
 
-app = FastAPI(title="LLM Visibility API", version="0.5.0")
-
-# --- CORS ---
-origins = [
-    "http://localhost:5173",  # Vite dev
-    "https://llm-visibility-production.up.railway.app",  # backend itself if needed
-    "https://llm-visibility-frontend-production.up.railway.app",
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="LLM Visibility API", version="0.4.0")
 
 
 # --- DB Session Dependency ---
@@ -299,13 +287,6 @@ def list_products(db: Session = Depends(get_db)):
 
 @app.post("/run-llm-check", response_model=LLMCheckResult)
 def run_llm_check(payload: LLMCheckRequest, db: Session = Depends(get_db)):
-    """
-    Ad-hoc single prompt check from the UI.
-
-    NOTE:
-    - We DO NOT create / link a Prompt row here yet.
-      `prompt_id` remains NULL for these "manual" tests.
-    """
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -321,7 +302,6 @@ def run_llm_check(payload: LLMCheckRequest, db: Session = Depends(get_db)):
 
     row = LLMTest(
         product_id=product.id,
-        prompt_id=None,  # no linked Prompt for ad-hoc checks (yet)
         model_used=result["model"],
         prompt=payload.prompt,
         appeared=result["appeared"],
@@ -342,12 +322,6 @@ def run_llm_check(payload: LLMCheckRequest, db: Session = Depends(get_db)):
 
 @app.get("/prompt-packs", response_model=List[PromptPackSummary])
 def get_prompt_packs():
-    """
-    Returns prompt packs from the JSON files on disk.
-
-    DB-backed packs are also written as JSON when created, so
-    this endpoint still works as before for the frontend.
-    """
     packs_raw = list_prompt_packs()
     return [
         PromptPackSummary(
@@ -363,13 +337,6 @@ def get_prompt_packs():
 
 @app.post("/run-llm-batch", response_model=LLMRunBatchResult)
 def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
-    """
-    Batch run visibility tests for a product + prompt pack.
-
-    Priority:
-    1) Use DB-backed PromptPack + Prompt rows (preferred).
-    2) Fallback to JSON-only pack on disk (legacy packs).
-    """
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -379,75 +346,40 @@ def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
     if not domain:
         raise HTTPException(status_code=400, detail="Invalid product URL domain")
 
-    # 1) Try DB-backed pack
-    pack_row = db.query(PromptPack).filter(PromptPack.pack_id == payload.pack_id).one_or_none()
+    try:
+        pack = load_prompt_pack(payload.pack_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-    total = 0
+    prompts = pack.get("prompts", [])
+    if not prompts:
+        raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
+
+    total = len(prompts)
     appeared_count = 0
-    tests_to_insert: List[LLMTest] = []
+    rows: List[LLMTest] = []
 
-    if pack_row and pack_row.prompts:
-        # Use DB prompts (we get prompt_id + text)
-        db_prompts: List[Prompt] = pack_row.prompts
-        total = len(db_prompts)
+    for prompt in prompts:
+        result = run_llm_visibility_check(
+            prompt=prompt,
+            domain=domain,
+            model=payload.model,
+        )
+        if result["appeared"]:
+            appeared_count += 1
 
-        for pr in db_prompts:
-            result = run_llm_visibility_check(
-                prompt=pr.text,
-                domain=domain,
-                model=payload.model,
-            )
-            if result["appeared"]:
-                appeared_count += 1
+        row = LLMTest(
+            product_id=product.id,
+            model_used=result["model"],
+            prompt=prompt,
+            appeared=result["appeared"],
+            matched_domain=result["matched"] or None,
+            snippet=result["snippet"],
+        )
+        rows.append(row)
 
-            tests_to_insert.append(
-                LLMTest(
-                    product_id=product.id,
-                    prompt_id=pr.id,
-                    model_used=result["model"],
-                    prompt=pr.text,
-                    appeared=result["appeared"],
-                    matched_domain=result["matched"] or None,
-                    snippet=result["snippet"],
-                )
-            )
-
-    else:
-        # 2) Fallback: use legacy JSON pack
-        try:
-            pack_data = load_prompt_pack(payload.pack_id)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-
-        prompts = pack_data.get("prompts", [])
-        if not prompts:
-            raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
-
-        total = len(prompts)
-
-        for prompt_text in prompts:
-            result = run_llm_visibility_check(
-                prompt=prompt_text,
-                domain=domain,
-                model=payload.model,
-            )
-            if result["appeared"]:
-                appeared_count += 1
-
-            tests_to_insert.append(
-                LLMTest(
-                    product_id=product.id,
-                    prompt_id=None,  # no linked Prompt for legacy packs
-                    model_used=result["model"],
-                    prompt=prompt_text,
-                    appeared=result["appeared"],
-                    matched_domain=result["matched"] or None,
-                    snippet=result["snippet"],
-                )
-            )
-
-    if tests_to_insert:
-        db.add_all(tests_to_insert)
+    if rows:
+        db.add_all(rows)
         db.commit()
 
     visibility_score = appeared_count / total if total > 0 else 0.0
@@ -463,18 +395,9 @@ def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/generate-prompt-pack", response_model=GeneratePromptPackResponse)
-def generate_prompt_pack(
-    payload: GeneratePromptPackRequest,
-    db: Session = Depends(get_db),
-    request: Request = None,
-):
+def generate_prompt_pack(payload: GeneratePromptPackRequest, db: Session = Depends(get_db), request: Request = None,):
     """
     Source A: LLM-generated high-intent prompts (behavioural categories).
-
-    Behaviour:
-    - Generate pack dict via OpenAI.
-    - Persist PromptPack + Prompt rows in DB (with source='behavioural').
-    - Write JSON file to prompt_packs/{id}.json for download / legacy flows.
     """
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
@@ -492,15 +415,6 @@ def generate_prompt_pack(
         name=payload.name,
     )
 
-    # Persist in DB (PromptPack + Prompt rows)
-    persist_pack_and_prompts(
-        db=db,
-        product=product,
-        pack_data=pack,
-        source="behavioural",
-    )
-
-    # Persist JSON on disk (unchanged behaviour for the frontend)
     file_path = save_prompt_pack_to_file(pack)
     base_url = str(request.base_url).rstrip("/")
     download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
@@ -514,18 +428,9 @@ def generate_prompt_pack(
 
 
 @app.post("/generate-google-prompt-pack", response_model=GenerateGooglePromptPackResponse)
-def generate_google_prompt_pack(
-    payload: GenerateGooglePromptPackRequest,
-    db: Session = Depends(get_db),
-    request: Request = None,
-):
+def generate_google_prompt_pack(payload: GenerateGooglePromptPackRequest, db: Session = Depends(get_db), request: Request = None,):
     """
     Source B: Google-seeded high-intent prompts (Scrapingdog 'people also ask').
-
-    Behaviour:
-    - Generate pack dict via OpenAI using real Google 'people also ask' queries.
-    - Persist PromptPack + Prompt rows in DB (source='google').
-    - Write JSON file to prompt_packs/{id}.json for download / legacy flows.
     """
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
@@ -548,15 +453,6 @@ def generate_google_prompt_pack(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating Google prompt pack: {e}")
 
-    # Persist in DB
-    persist_pack_and_prompts(
-        db=db,
-        product=product,
-        pack_data=pack,
-        source="google",
-    )
-
-    # Persist JSON on disk
     file_path = save_prompt_pack_to_file(pack)
     base_url = str(request.base_url).rstrip("/")
     download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
@@ -570,11 +466,7 @@ def generate_google_prompt_pack(
 
 
 @app.post("/visibility-report", response_model=VisibilityReportResponse)
-async def visibility_report(
-    payload: VisibilityReportRequest,
-    db: Session = Depends(get_db),
-    request: Request = None,
-):
+async def visibility_report(payload: VisibilityReportRequest, db: Session = Depends(get_db), request: Request = None,):
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")

@@ -1,13 +1,12 @@
+
 import os
 import json
 from typing import Dict, Any, List, Optional
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from sqlalchemy.orm import Session
 
 from app.services.prompt_packs import PROMPT_PACKS_DIR
-from app.models.models import PromptPack, Prompt, Product
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -16,15 +15,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 def _ensure_api_key():
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set in environment")
-
-
-def _normalize_prompt(text: str) -> str:
-    """
-    Normalise prompt text for de-duplication:
-    - strip whitespace
-    - lowercase
-    """
-    return (text or "").strip().lower()
 
 
 def _generate_prompts_with_llm(
@@ -189,14 +179,8 @@ def generate_prompt_pack_for_product(
     """
     Returns a dict in the same structure as your JSON prompt pack files.
     Prompts are generated with explicit high-purchase-intent logic.
-
-    NOTE:
-    - This function does NOT touch the database.
-    - Use `persist_pack_and_prompts(...)` separately to store the pack + prompts.
     """
-    prompts = _generate_prompts_with_llm(
-        product_title, product_url, category, num_prompts
-    )
+    prompts = _generate_prompts_with_llm(product_title, product_url, category, num_prompts)
 
     base_id = pack_id or f"auto_{product_id}_{_slugify(product_title)}"
     pack_name = name or f"Auto Pack for {product_title[:60]}"
@@ -224,96 +208,3 @@ def save_prompt_pack_to_file(pack: Dict[str, Any]) -> str:
         json.dump(pack, f, ensure_ascii=False, indent=2)
 
     return fpath
-
-
-def persist_pack_and_prompts(
-    db: Session,
-    pack: Dict[str, Any],
-    product_id: Optional[int] = None,
-    source: Optional[str] = None,
-) -> PromptPack:
-    """
-    Persist a prompt pack + its individual prompts into the database.
-
-    - Ensures there is a PromptPack row for `pack["id"]`.
-    - Creates Prompt rows for each prompt string (soft de-dup via text_normalized).
-    - Optionally associates them with a Product (via product_id) and a source label.
-
-    Returns the PromptPack ORM instance.
-    """
-    pack_id_str = pack.get("id")
-    if not pack_id_str:
-        raise ValueError("Pack must have an 'id' field")
-
-    # Optional product linkage (if the pack is tied to a specific product)
-    product: Optional[Product] = None
-    if product_id is not None:
-        product = db.query(Product).filter(Product.id == product_id).one_or_none()
-        # If product is missing we simply proceed without linking; no hard failure.
-    
-    # 1) Upsert PromptPack
-    pp = (
-        db.query(PromptPack)
-        .filter(PromptPack.pack_id == pack_id_str)
-        .one_or_none()
-    )
-
-    if pp is None:
-        pp = PromptPack(
-            pack_id=pack_id_str,
-            name=pack.get("name") or pack_id_str,
-            category=pack.get("category"),
-            language=pack.get("language") or "en",
-            source=source,
-            product_id=product.id if product else None,
-        )
-        db.add(pp)
-    else:
-        # Update basic metadata if changed / newly available
-        pp.name = pack.get("name") or pp.name
-        pp.category = pack.get("category") or pp.category
-        pp.language = pack.get("language") or pp.language
-        if source and not pp.source:
-            pp.source = source
-        if product and not pp.product_id:
-            pp.product_id = product.id
-
-    db.flush()  # ensure pp.id is populated
-
-    # 2) Create Prompt rows (soft de-dup on text_normalized)
-    prompts_list = pack.get("prompts", []) or []
-    for p in prompts_list:
-        if not isinstance(p, str):
-            continue
-
-        raw = p.strip()
-        if not raw:
-            continue
-
-        norm = _normalize_prompt(raw)
-
-        existing = (
-            db.query(Prompt)
-            .filter(Prompt.text_normalized == norm)
-            .one_or_none()
-        )
-
-        if existing is None:
-            prompt_row = Prompt(
-                text=raw,
-                text_normalized=norm,
-                source=source,
-                pack=pp,
-                product_id=product.id if product else None,
-            )
-            db.add(prompt_row)
-        else:
-            # Prompt already exists globally. Optionally link to this pack/product if missing.
-            if existing.pack_id is None:
-                existing.pack = pp
-            if product and existing.product_id is None:
-                existing.product_id = product.id
-
-    db.commit()
-    db.refresh(pp)
-    return pp
