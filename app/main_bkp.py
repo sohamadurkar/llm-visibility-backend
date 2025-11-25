@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
@@ -41,6 +42,15 @@ from app.services.visibility_report import (
 load_dotenv()
 
 app = FastAPI(title="LLM Visibility API", version="0.4.0")
+
+# CORS setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://llm-visibility-frontend-production.up.railway.app"],  # or ["https://your-frontend.app"] for tighter security
+    allow_credentials=True,
+    allow_methods=["*"],  # allows OPTIONS, GET, POST, etc.
+    allow_headers=["*"],
+)
 
 
 # --- DB Session Dependency ---
