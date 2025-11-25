@@ -639,7 +639,7 @@ async def visibility_report(
         filename = os.path.basename(file_path)
         download_url = f"{base_url}/download/report/{filename}"
     except Exception as e:
-        raise HTTPException(status_code=500, detail	f"Error saving report: {e}")
+        raise HTTPException(status_code=500, detail=f"Error saving report: {e}")
 
     return VisibilityReportResponse(
         product_id=product.id,
