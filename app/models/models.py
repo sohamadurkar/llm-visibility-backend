@@ -37,16 +37,23 @@ class Product(Base):
 
     website = relationship("Website", back_populates="products")
 
-    # NEW: prompt packs generated for / around this product
+    # Prompt packs generated for / around this product
     prompt_packs = relationship(
         "PromptPack",
         back_populates="product",
         cascade="all, delete-orphan",
     )
 
-    # NEW: individual prompts associated with this product
+    # Individual prompts associated with this product
     prompts = relationship(
         "Prompt",
+        back_populates="product",
+        cascade="all, delete-orphan",
+    )
+
+    # All LLM test runs for this product
+    llm_tests = relationship(
+        "LLMTest",
         back_populates="product",
         cascade="all, delete-orphan",
     )
@@ -125,12 +132,19 @@ class Prompt(Base):
     pack = relationship("PromptPack", back_populates="prompts")
     product = relationship("Product", back_populates="prompts")
 
+    # All LLM tests that used this stored prompt
+    llm_tests = relationship(
+        "LLMTest",
+        back_populates="prompt_obj",
+        cascade="all, delete-orphan",
+    )
+
     __table_args__ = (
-      # Example uniqueness constraint:
-      # Uncomment if you want to enforce "no duplicate prompt text per product"
-      # UniqueConstraint(
-      #     "product_id",
-      #     "text_normalized",
-      #     name="uq_prompt_product_text_normalized",
-      # ),
+        # Example uniqueness constraint:
+        # Uncomment if you want to enforce "no duplicate prompt text per product"
+        # UniqueConstraint(
+        #     "product_id",
+        #     "text_normalized",
+        #     name="uq_prompt_product_text_normalized",
+        # ),
     )
