@@ -8,7 +8,6 @@ from openai import OpenAI
 from app.services.google_queries import (
     collect_google_queries_for_product,
 )
-from app.services.prompt_packs import PROMPT_PACKS_DIR
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -20,6 +19,9 @@ def _ensure_api_key():
 
 
 def _slugify(text: str, max_length: int = 40) -> str:
+    """
+    Simple slug generator for filenames / IDs.
+    """
     text = text.lower()
     slug = []
     for ch in text:
@@ -150,6 +152,11 @@ def generate_google_prompt_pack_for_product(
 ) -> Dict[str, Any]:
     """
     Build a prompt pack based on real Google queries (Source B).
+
+    NOTE:
+    - This function does NOT touch the database.
+    - Use `persist_pack_and_prompts(...)` (from prompt_generator.py)
+      in your endpoint to store the pack + prompts.
     """
     # 1) Collect real queries from Google via Scrapingdog
     google_queries = collect_google_queries_for_product(
@@ -159,7 +166,9 @@ def generate_google_prompt_pack_for_product(
     )
 
     if not google_queries:
-        raise RuntimeError("Could not obtain any Google-based queries for this product/category")
+        raise RuntimeError(
+            "Could not obtain any Google-based queries for this product/category"
+        )
 
     # 2) Turn them into high-intent prompts
     prompts = _generate_prompts_from_google_queries(

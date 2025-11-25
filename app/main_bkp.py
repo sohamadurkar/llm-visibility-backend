@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
@@ -25,16 +26,37 @@ from app.services.prompt_generator import (
 from app.services.google_prompt_generator import (
     generate_google_prompt_pack_for_product,
 )
+from app.services.prompt_packs import (
+    list_prompt_packs,
+    load_prompt_pack,
+    PROMPT_PACKS_DIR,
+)
 from app.services.visibility_report import (
     fetch_page_html_via_scraperapi,
     build_page_snapshot,
     generate_visibility_report_markdown,
     save_report_markdown_to_file,
+    REPORTS_DIR,
 )
 
 load_dotenv()
 
 app = FastAPI(title="LLM Visibility API", version="0.4.0")
+
+# --- CORS ---
+origins = [
+    "http://localhost:5173",  # Vite dev
+    "https://llm-visibility-production.up.railway.app",  # backend itself if needed
+    "https://llm-visibility-frontend-production.up.railway.app",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # --- DB Session Dependency ---
@@ -126,6 +148,7 @@ class GeneratePromptPackResponse(BaseModel):
     pack_id: str
     num_prompts: int
     file_path: str
+    download_url: str
 
 
 class GenerateGooglePromptPackRequest(BaseModel):
@@ -140,6 +163,7 @@ class GenerateGooglePromptPackResponse(BaseModel):
     pack_id: str
     num_prompts: int
     file_path: str
+    download_url: str
 
 
 class VisibilityReportRequest(BaseModel):
@@ -152,6 +176,7 @@ class VisibilityReportResponse(BaseModel):
     model_used: str
     report_markdown: str
     file_path: str
+    download_url: str
 
 
 # --- Endpoints ---
@@ -386,7 +411,7 @@ def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/generate-prompt-pack", response_model=GeneratePromptPackResponse)
-def generate_prompt_pack(payload: GeneratePromptPackRequest, db: Session = Depends(get_db)):
+def generate_prompt_pack(payload: GeneratePromptPackRequest, db: Session = Depends(get_db), request: Request = None,):
     """
     Source A: LLM-generated high-intent prompts (behavioural categories).
     """
@@ -407,16 +432,19 @@ def generate_prompt_pack(payload: GeneratePromptPackRequest, db: Session = Depen
     )
 
     file_path = save_prompt_pack_to_file(pack)
+    base_url = str(request.base_url).rstrip("/")
+    download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
 
     return GeneratePromptPackResponse(
         pack_id=pack["id"],
         num_prompts=len(pack.get("prompts", [])),
         file_path=file_path,
+        download_url=download_url,
     )
 
 
 @app.post("/generate-google-prompt-pack", response_model=GenerateGooglePromptPackResponse)
-def generate_google_prompt_pack(payload: GenerateGooglePromptPackRequest, db: Session = Depends(get_db)):
+def generate_google_prompt_pack(payload: GenerateGooglePromptPackRequest, db: Session = Depends(get_db), request: Request = None,):
     """
     Source B: Google-seeded high-intent prompts (Scrapingdog 'people also ask').
     """
@@ -442,16 +470,19 @@ def generate_google_prompt_pack(payload: GenerateGooglePromptPackRequest, db: Se
         raise HTTPException(status_code=500, detail=f"Error generating Google prompt pack: {e}")
 
     file_path = save_prompt_pack_to_file(pack)
+    base_url = str(request.base_url).rstrip("/")
+    download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
 
     return GenerateGooglePromptPackResponse(
         pack_id=pack["id"],
         num_prompts=len(pack.get("prompts", [])),
         file_path=file_path,
+        download_url=download_url,
     )
 
 
 @app.post("/visibility-report", response_model=VisibilityReportResponse)
-async def visibility_report(payload: VisibilityReportRequest, db: Session = Depends(get_db)):
+async def visibility_report(payload: VisibilityReportRequest, db: Session = Depends(get_db), request: Request = None,):
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -512,6 +543,9 @@ async def visibility_report(payload: VisibilityReportRequest, db: Session = Depe
 
     try:
         file_path = save_report_markdown_to_file(product.id, report_md)
+        base_url = str(request.base_url).rstrip("/")
+        filename = os.path.basename(file_path)
+        download_url = f"{base_url}/download/report/{filename}"
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving report: {e}")
 
@@ -520,4 +554,46 @@ async def visibility_report(payload: VisibilityReportRequest, db: Session = Depe
         model_used=payload.model,
         report_markdown=report_md,
         file_path=file_path,
+        download_url=download_url,
+    )
+
+
+@app.get("/download/prompt-pack/{pack_id}")
+def download_prompt_pack(pack_id: str):
+    """
+    Download a prompt pack JSON file by pack_id.
+    """
+    if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
+        raise HTTPException(status_code=400, detail="Invalid pack_id")
+
+    fname = f"{pack_id}.json"
+    fpath = os.path.join(PROMPT_PACKS_DIR, fname)
+
+    if not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="Prompt pack file not found")
+
+    return FileResponse(
+        path=fpath,
+        media_type="application/json",
+        filename=fname,
+    )
+
+
+@app.get("/download/report/{filename}")
+def download_report(filename: str):
+    """
+    Download a Markdown report file by filename.
+    """
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    fpath = os.path.join(REPORTS_DIR, filename)
+
+    if not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="Report file not found")
+
+    return FileResponse(
+        path=fpath,
+        media_type="text/markdown",
+        filename=filename,
     )
