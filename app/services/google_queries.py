@@ -1,4 +1,3 @@
-
 import os
 from typing import List, Dict, Any, Optional
 
@@ -16,10 +15,12 @@ def _ensure_api_key():
         raise RuntimeError("SCRAPINGDOG_API_KEY not set in environment (.env)")
 
 
-def fetch_google_serp(query: str,
-                      country: str = "uk",
-                      results: int = 10,
-                      page: int = 0) -> Dict[str, Any]:
+def fetch_google_serp(
+    query: str,
+    country: str = "uk",
+    results: int = 10,
+    page: int = 0,
+) -> Dict[str, Any]:
     """
     Calls Scrapingdog Google Search API and returns the JSON response.
     """
@@ -40,12 +41,14 @@ def fetch_google_serp(query: str,
 
 def extract_people_also_ask_questions(data: Dict[str, Any]) -> List[str]:
     """
+    Source A – People Also Ask (PAA)
     From a Scrapingdog Google response, extract 'people_also_ask' questions.
     If your Scrapingdog plan/response uses a different key, extend this function.
     """
     questions: List[str] = []
     paa = data.get("people_also_ask", [])
     for item in paa:
+        # Common Scrapingdog PAA shape: { "question": "...", ... }
         q = item.get("question")
         if isinstance(q, str):
             q = q.strip()
@@ -54,11 +57,69 @@ def extract_people_also_ask_questions(data: Dict[str, Any]) -> List[str]:
     return questions
 
 
-def build_default_seed_queries(product_title: str,
-                               category: Optional[str]) -> List[str]:
+def extract_related_searches(data: Dict[str, Any]) -> List[str]:
+    """
+    Source B – Related Searches
+    Extracts 'related_searches' terms from the SERP JSON.
+    Scrapingdog typically exposes these as an array like:
+      "related_searches": [{"query": "..."}, ...]
+    but we are defensive and check multiple keys.
+    """
+    related: List[str] = []
+    raw_related = data.get("related_searches", [])
+
+    for item in raw_related:
+        # Try several likely key names
+        q = (
+            item.get("query")
+            or item.get("keyword")
+            or item.get("title")
+        )
+        if isinstance(q, str):
+            q = q.strip()
+            if q:
+                related.append(q)
+
+    return related
+
+
+def extract_titles_and_snippets(data: Dict[str, Any]) -> List[str]:
+    """
+    Source C – Search Result Titles & Snippets
+    Extracts phrases from organic result titles/snippets which indicate
+    how Google is framing this intent.
+
+    We don't treat them as “queries” 1:1, but we treat them as text
+    describing what people are searching for and what pages promise.
+    """
+    phrases: List[str] = []
+
+    organic = data.get("organic_results", []) or data.get("results", [])
+    for item in organic:
+        # Title
+        t = item.get("title")
+        if isinstance(t, str):
+            t = t.strip()
+            if t:
+                phrases.append(t)
+
+        # Snippet / description
+        s = item.get("snippet") or item.get("description")
+        if isinstance(s, str):
+            s = s.strip()
+            if s:
+                phrases.append(s)
+
+    return phrases
+
+
+def build_default_seed_queries(
+    product_title: str,
+    category: Optional[str],
+) -> List[str]:
     """
     Simple heuristic to create seed queries for a product.
-    These double as a fallback if Google returns no PAA.
+    These double as a fallback if Google returns no data.
     """
     seeds = [
         product_title,
@@ -83,22 +144,28 @@ def build_default_seed_queries(product_title: str,
     return uniq
 
 
-def collect_google_queries_for_product(product_title: str,
-                                       category: Optional[str],
-                                       max_questions: int = 50) -> List[str]:
+def collect_google_queries_for_product(
+    product_title: str,
+    category: Optional[str],
+    max_questions: int = 50,
+) -> List[str]:
     """
     Runs multiple seed queries through Scrapingdog and aggregates
-    unique 'people also ask' questions.
+    unique signals from:
+
+    - Source A: People Also Ask (PAA)
+    - Source B: Related Searches
+    - Source C: Organic Result Titles & Snippets
 
     Fallback behaviour:
-    - If no PAA questions are found for any seed queries, return the seed
+    - If no items are found for any seed queries, return the seed
       queries themselves so that the pipeline can still generate prompts.
     """
     seeds = build_default_seed_queries(product_title, category)
-    all_questions: List[str] = []
+    all_items: List[str] = []
     seen = set()
 
-    # Try to collect PAA questions
+    # Try to collect signals from all three sources
     for seed in seeds:
         try:
             data = fetch_google_serp(seed, country="uk", results=10, page=0)
@@ -106,17 +173,23 @@ def collect_google_queries_for_product(product_title: str,
             # Fail quietly for individual seeds; continue with others
             continue
 
-        qs = extract_people_also_ask_questions(data)
-        for q in qs:
+        # A: PAA questions
+        paa_qs = extract_people_also_ask_questions(data)
+        # B: Related searches
+        related_qs = extract_related_searches(data)
+        # C: Titles & snippets
+        title_snippet_phrases = extract_titles_and_snippets(data)
+
+        for q in paa_qs + related_qs + title_snippet_phrases:
             q_norm = q.lower()
             if q_norm not in seen:
                 seen.add(q_norm)
-                all_questions.append(q)
-                if len(all_questions) >= max_questions:
-                    return all_questions
+                all_items.append(q)
+                if len(all_items) >= max_questions:
+                    return all_items
 
-    # Fallback: if no questions were collected, use the seeds themselves
-    if not all_questions:
+    # Fallback: if nothing at all was collected, use the seeds themselves
+    if not all_items:
         return seeds
 
-    return all_questions
+    return all_items

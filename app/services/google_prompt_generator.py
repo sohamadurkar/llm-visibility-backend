@@ -1,7 +1,7 @@
 import os
 import json
 from typing import Dict, Any, List, Optional
-from datetime import datetime  # ✅ NEW
+from datetime import datetime
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -39,45 +39,52 @@ def _generate_prompts_from_google_queries(
     product_url: str,
     category: Optional[str],
     num_prompts: int,
-    google_queries: List[str],
+    google_signals: List[str],
 ) -> List[str]:
     """
-    Uses OpenAI to turn raw Google queries into high-intent shopping prompts.
+    Uses OpenAI to turn Google-based signals (PAA, Related Searches,
+    Titles & Snippets) into high-intent shopping prompts.
     """
     _ensure_api_key()
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # Limit how many raw queries we send in to keep token usage reasonable
-    google_queries = google_queries[:80]
+    # Limit how many raw signals we send in to keep token usage reasonable
+    google_signals = google_signals[:80]
 
     system_msg = (
         "You are an expert e-commerce growth marketer and search strategist. "
-        "You specialise in transforming raw Google search queries into "
+        "You specialise in transforming real Google search behaviour into "
         "high-intent shopping prompts that a user would ask an AI assistant when "
         "they are actively looking to BUY a product, not just research it."
     )
 
-    queries_json = json.dumps(google_queries, ensure_ascii=False, indent=2)
+    signals_json = json.dumps(google_signals, ensure_ascii=False, indent=2)
 
     user_msg = f"""
-You are given REAL Google user queries (from 'people also ask') related to a product:
+You are given REAL Google-derived signals related to a product, combined from:
+
+- Source A – People Also Ask (PAA) questions
+- Source B – Related searches
+- Source C – Organic result titles & snippets
+
+Product context:
 
 - Product title: {product_title}
 - Product page URL: {product_url}
 - Product/category: {category or "unknown"}
 
-Here are the raw Google queries as a JSON array of strings:
+Here are the combined Google signals as a JSON array of strings:
 
-{queries_json}
+{signals_json}
 
 Your tasks:
 
 1) Filter out:
-   - purely informational / educational questions,
-   - generic "what is" / "why" questions that are not clearly about buying,
+   - purely informational / educational content,
+   - generic "what is" / "why" content that is not clearly about buying,
    - things that don't reflect commercial / transactional intent.
 
-2) From the remaining queries, rewrite and expand them into
+2) From the remaining items, infer and rewrite them into
    NATURAL-LANGUAGE SHOPPING PROMPTS that a user would ask an AI assistant
    (like ChatGPT) when they are actively looking to discover and BUY products
    like this.
@@ -135,7 +142,7 @@ Your tasks:
                 cleaned.append(s)
 
     if not cleaned:
-        raise RuntimeError("LLM returned no prompts from Google queries")
+        raise RuntimeError("LLM returned no prompts from Google signals")
 
     return cleaned[:num_prompts]
 
@@ -150,22 +157,18 @@ def generate_google_prompt_pack_for_product(
     name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Build a prompt pack based on real Google queries (Source B).
-
-    IMPORTANT:
-    - If pack_id is not provided, we generate a UNIQUE pack ID each time
-      using product_id + slug + timestamp. This means every generation is
-      a new versioned pack linked to the same product.
+    Build a prompt pack based on real Google signals (Sources A, B, C).
+    Uses versioned pack IDs so each generation is a new pack.
     """
-    # 1) Collect real queries from Google via Scrapingdog
-    google_queries = collect_google_queries_for_product(
+    # 1) Collect Google signals via Scrapingdog (PAA + related + titles/snippets)
+    google_signals = collect_google_queries_for_product(
         product_title=product_title,
         category=category,
         max_questions=80,
     )
 
-    if not google_queries:
-        raise RuntimeError("Could not obtain any Google-based queries for this product/category")
+    if not google_signals:
+        raise RuntimeError("Could not obtain any Google-based signals for this product/category")
 
     # 2) Turn them into high-intent prompts
     prompts = _generate_prompts_from_google_queries(
@@ -173,10 +176,10 @@ def generate_google_prompt_pack_for_product(
         product_url=product_url,
         category=category,
         num_prompts=num_prompts,
-        google_queries=google_queries,
+        google_signals=google_signals,
     )
 
-    # 3) Pack metadata
+    # 3) Pack metadata (versioned ID)
     if pack_id:
         base_id = pack_id
     else:
@@ -190,7 +193,7 @@ def generate_google_prompt_pack_for_product(
         "name": pack_name,
         "category": category or "google_seeded_high_intent",
         "language": "en",
-        "source": "google_people_also_ask",
+        "source": "google_people_also_ask_related_titles_snippets",
         "prompts": prompts,
     }
     return pack
