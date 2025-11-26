@@ -1,7 +1,7 @@
-
 import os
 import json
 from typing import Dict, Any, List, Optional
+from datetime import datetime  # ✅ NEW
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -179,10 +179,20 @@ def generate_prompt_pack_for_product(
     """
     Returns a dict in the same structure as your JSON prompt pack files.
     Prompts are generated with explicit high-purchase-intent logic.
+
+    IMPORTANT:
+    - If pack_id is not provided, we generate a UNIQUE pack ID each time
+      using product_id + slug + timestamp. This means each generation is
+      a new versioned pack and old packs remain intact.
     """
     prompts = _generate_prompts_with_llm(product_title, product_url, category, num_prompts)
 
-    base_id = pack_id or f"auto_{product_id}_{_slugify(product_title)}"
+    if pack_id:
+        base_id = pack_id
+    else:
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        base_id = f"auto_{product_id}_{_slugify(product_title)}_{timestamp}"
+
     pack_name = name or f"Auto Pack for {product_title[:60]}"
 
     pack: Dict[str, Any] = {
@@ -190,6 +200,8 @@ def generate_prompt_pack_for_product(
         "name": pack_name,
         "category": category or "auto_generated_high_intent",
         "language": "en",
+        # You can optionally add a source flag here if you like:
+        # "source": "auto_generated_high_intent",
         "prompts": prompts,
     }
     return pack

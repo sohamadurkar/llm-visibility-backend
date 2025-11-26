@@ -1,7 +1,7 @@
-
 import os
 import json
 from typing import Dict, Any, List, Optional
+from datetime import datetime  # ✅ NEW
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -151,6 +151,11 @@ def generate_google_prompt_pack_for_product(
 ) -> Dict[str, Any]:
     """
     Build a prompt pack based on real Google queries (Source B).
+
+    IMPORTANT:
+    - If pack_id is not provided, we generate a UNIQUE pack ID each time
+      using product_id + slug + timestamp. This means every generation is
+      a new versioned pack linked to the same product.
     """
     # 1) Collect real queries from Google via Scrapingdog
     google_queries = collect_google_queries_for_product(
@@ -172,7 +177,12 @@ def generate_google_prompt_pack_for_product(
     )
 
     # 3) Pack metadata
-    base_id = pack_id or f"google_auto_{product_id}_{_slugify(product_title)}"
+    if pack_id:
+        base_id = pack_id
+    else:
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        base_id = f"google_auto_{product_id}_{_slugify(product_title)}_{timestamp}"
+
     pack_name = name or f"Google Seeded Pack for {product_title[:60]}"
 
     pack: Dict[str, Any] = {

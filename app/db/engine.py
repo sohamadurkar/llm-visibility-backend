@@ -13,7 +13,7 @@ if not DATABASE_URL:
     # Fallback ONLY for local development if you want it.
     # In Railway you will ALWAYS set DATABASE_URL and this block won't run.
     # If you truly never want SQLite anywhere, remove this fallback and raise instead.
-    DATABASE_URL = "sqlite:///./data/llmvis.db"
+    DATABASE_URL = "DATABASE_URL not set – please configure it in Railway"
 
 # For SQLite we need check_same_thread; for others we don't.
 connect_args = {}
