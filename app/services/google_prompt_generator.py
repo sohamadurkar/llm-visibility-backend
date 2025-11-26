@@ -10,6 +10,7 @@ from app.services.google_queries import (
     collect_google_queries_for_product,
 )
 from app.services.prompt_packs import PROMPT_PACKS_DIR
+from app.config import DEFAULT_GOOGLE_PACK_MODEL  # centralised model
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -122,7 +123,7 @@ Your tasks:
 """
 
     completion = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=DEFAULT_GOOGLE_PACK_MODEL,  # now comes from config/env
         messages=[
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},

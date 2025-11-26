@@ -1,12 +1,13 @@
 import os
 import json
 from typing import Dict, Any, List, Optional
-from datetime import datetime  # ✅ NEW
+from datetime import datetime
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from app.services.prompt_packs import PROMPT_PACKS_DIR
+from app.config import DEFAULT_PROMPT_PACK_MODEL  # NEW
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -25,20 +26,6 @@ def _generate_prompts_with_llm(
 ) -> List[str]:
     """
     Uses OpenAI to generate a list of high-intent shopping prompts for a product/category.
-
-    Behavioural logic applied:
-    - Only generate prompts where the user is clearly looking to BUY (commercial / transactional intent).
-    - Cover (as much as possible) these 7 purchase behaviours:
-        1) Product discovery within a buy mindset
-        2) Specific product / close alternatives
-        3) Price- and budget-sensitive buying
-        4) Occasion / use-case driven buying
-        5) Fit / comfort / practicality concerns before buying
-        6) Trend / popularity driven buying
-        7) Brand / store preference driven buying
-
-    - Avoid purely informational / research queries (e.g. “are velvet shoes good for winter?”).
-    - Prompts should sound like real user queries to an AI assistant with the intent to find a product to purchase.
     """
     _ensure_api_key()
 
@@ -121,7 +108,7 @@ Very important behavioural rules:
 """
 
     completion = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model=DEFAULT_PROMPT_PACK_MODEL,  # now from config
         messages=[
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
@@ -131,7 +118,6 @@ Very important behavioural rules:
 
     content = completion.choices[0].message.content or ""
 
-    # Parse JSON as instructed
     data = json.loads(content)
     prompts = data.get("prompts", [])
 
@@ -145,14 +131,10 @@ Very important behavioural rules:
     if not cleaned:
         raise RuntimeError("LLM returned no prompts")
 
-    # Trim to desired size
     return cleaned[:num_prompts]
 
 
 def _slugify(text: str, max_length: int = 40) -> str:
-    """
-    Simple slug generator for filenames / IDs.
-    """
     text = text.lower()
     slug = []
     for ch in text:
@@ -160,7 +142,6 @@ def _slugify(text: str, max_length: int = 40) -> str:
             slug.append(ch)
         elif ch in " _-":
             slug.append("-")
-        # ignore everything else
     s = "".join(slug).strip("-")
     if len(s) > max_length:
         s = s[:max_length].rstrip("-")
@@ -182,8 +163,7 @@ def generate_prompt_pack_for_product(
 
     IMPORTANT:
     - If pack_id is not provided, we generate a UNIQUE pack ID each time
-      using product_id + slug + timestamp. This means each generation is
-      a new versioned pack and old packs remain intact.
+      using product_id + slug + timestamp.
     """
     prompts = _generate_prompts_with_llm(product_title, product_url, category, num_prompts)
 
@@ -200,17 +180,13 @@ def generate_prompt_pack_for_product(
         "name": pack_name,
         "category": category or "auto_generated_high_intent",
         "language": "en",
-        # You can optionally add a source flag here if you like:
-        # "source": "auto_generated_high_intent",
+        "source": "auto_generated_high_intent",
         "prompts": prompts,
     }
     return pack
 
 
 def save_prompt_pack_to_file(pack: Dict[str, Any]) -> str:
-    """
-    Saves the pack dict as JSON under prompt_packs/{id}.json and returns full path.
-    """
     os.makedirs(PROMPT_PACKS_DIR, exist_ok=True)
     pack_id = pack.get("id") or "pack"
     fname = f"{pack_id}.json"

@@ -1,4 +1,3 @@
-
 import os
 import json
 from typing import Dict, Any, List, Optional
@@ -8,6 +7,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import httpx
+
+from app.config import DEFAULT_REPORT_MODEL  # NEW
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -132,7 +133,7 @@ def generate_visibility_report_markdown(
     has_product_jsonld: bool,
     visibility_metrics: Dict[str, Any],
     page_snapshot: Dict[str, Any],
-    model: str = "gpt-4.1",
+    model: str = DEFAULT_REPORT_MODEL,  # now comes from config
 ) -> str:
     """
     Calls OpenAI to generate a technical visibility report in Markdown.

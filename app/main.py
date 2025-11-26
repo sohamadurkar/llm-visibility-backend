@@ -17,6 +17,7 @@ from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
 from app.models.prompt_models import PromptPack, Prompt
+from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import run_llm_visibility_check
 from app.services.prompt_packs import list_prompt_packs, load_prompt_pack
@@ -97,7 +98,7 @@ class ProductOut(BaseModel):
 class LLMCheckRequest(BaseModel):
     product_id: int
     prompt: str
-    model: Optional[str] = "gpt-4.1-mini"
+    model: Optional[str] = DEFAULT_LLM_MODEL
 
 
 class LLMCheckResult(BaseModel):
@@ -119,7 +120,7 @@ class PromptPackSummary(BaseModel):
 class LLMRunBatchRequest(BaseModel):
     product_id: int
     pack_id: str
-    model: Optional[str] = "gpt-4.1-mini"
+    model: Optional[str] = DEFAULT_LLM_MODEL
 
 
 class LLMRunBatchResult(BaseModel):
@@ -163,7 +164,7 @@ class GenerateGooglePromptPackResponse(BaseModel):
 
 class VisibilityReportRequest(BaseModel):
     product_id: int
-    model: Optional[str] = "gpt-4.1"
+    model: Optional[str] = DEFAULT_REPORT_MODEL
 
 
 class VisibilityReportResponse(BaseModel):
