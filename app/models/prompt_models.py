@@ -22,7 +22,7 @@ class PromptPack(Base):
     source = Column(String, nullable=True)   # e.g. "auto_generated_high_intent", "google_people_also_ask"
     language = Column(String, default="en")
 
-    # Optional link to the product the pack was generated for
+    #  Optional link to the product the pack was generated for
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)

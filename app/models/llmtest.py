@@ -12,7 +12,7 @@ class LLMTest(Base):
     # Which product this test was run for
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
 
-    # NEW: link each test back to a specific prompt & pack (if applicable)
+    # NEW: link each test back to a specific prompt & pack  (if applicable)
     prompt_id = Column(Integer, ForeignKey("prompts.id"), nullable=True)
     pack_id = Column(Integer, ForeignKey("prompt_packs.id"), nullable=True)
 

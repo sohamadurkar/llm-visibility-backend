@@ -44,7 +44,7 @@ load_dotenv()
 
 app = FastAPI(title="LLM Visibility API", version="0.5.0")
 
-# CORS setup
+#  CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://llm-visibility-frontend-production.up.railway.app"],
