@@ -15,3 +15,8 @@ DEFAULT_GOOGLE_PACK_MODEL = os.getenv("DEFAULT_GOOGLE_PACK_MODEL", DEFAULT_LLM_M
 
 # Model to use for generating visibility reports
 DEFAULT_REPORT_MODEL = os.getenv("DEFAULT_REPORT_MODEL", "gpt-5.1")
+
+# ----- NEW: Auth / JWT settings -----
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change_me_in_env")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))

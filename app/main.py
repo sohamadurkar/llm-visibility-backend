@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel, HttpUrl, EmailStr
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import Optional, List, Dict, Any
@@ -19,6 +20,7 @@ from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
 from app.models.prompt_models import PromptPack, Prompt
+from app.models.user_models import User
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import run_llm_visibility_check
@@ -41,10 +43,18 @@ from app.services.visibility_report import (
     save_report_markdown_to_file,
     REPORTS_DIR,
 )
+from app.services.auth_utils import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    decode_access_token,
+)
 
 load_dotenv()
 
-app = FastAPI(title="LLM Visibility API", version="0.5.0")
+app = FastAPI(title="LLM Visibility API", version="0.6.0")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 #  CORS setup
 app.add_middleware(
@@ -257,6 +267,64 @@ class PromptPerformance(BaseModel):
     visibility_score: float
 
 
+# ----- Auth Pydantic models -----
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    id: int
+    email: EmailStr
+    is_active: bool
+    is_admin: bool
+
+    class Config:
+        from_attributes = True
+
+
+class RegisterAdminRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+# ----- Auth helpers (dependencies) -----
+
+def get_current_user(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    """
+    Decodes JWT, loads user from the CURRENT tenant schema.
+    """
+    from jose import JWTError
+
+    try:
+        payload = decode_access_token(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+    subject = payload.get("sub")
+    if subject is None:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    user = db.query(User).filter(User.email == subject).one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User is inactive")
+
+    return user
+
+
 # --- Endpoints ---
 
 @app.get("/health")
@@ -264,8 +332,74 @@ def health():
     return JSONResponse({"status": "ok"})
 
 
+# ----- Auth endpoints -----
+
+@app.post("/auth/register-admin", response_model=UserOut)
+def register_admin(
+    payload: RegisterAdminRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
+    """
+    Creates the FIRST admin user for the current tenant (schema defined by X-Tenant header).
+    You can later restrict this endpoint or remove it in production.
+    """
+    existing = db.query(User).filter(User.email == payload.email).one_or_none()
+    if existing:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+
+    user = User(
+        email=payload.email,
+        hashed_password=hash_password(payload.password),
+        is_admin=True,
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.post("/auth/login", response_model=Token)
+def login(
+    payload: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Login within the current tenant (from X-Tenant header).
+    Returns a JWT access token.
+    """
+    user = db.query(User).filter(User.email == payload.email).one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    if not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User is inactive")
+
+    # Get tenant code from header to embed in the token (optional for now)
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip() or "public"
+
+    access_token = create_access_token(
+        subject=user.email,
+        tenant=tenant_code,
+    )
+
+    return Token(access_token=access_token)
+
+
+# ----- Core product / visibility endpoints -----
+
 @app.post("/analyze-website", response_model=AnalyzeResult)
-async def analyze_website(payload: AnalyzeRequest, db: Session = Depends(get_db)):
+async def analyze_website(
+    payload: AnalyzeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     target_url = str(payload.url)
     parsed = urlparse(target_url)
     domain = parsed.netloc.lower()
@@ -357,7 +491,10 @@ async def analyze_website(payload: AnalyzeRequest, db: Session = Depends(get_db)
 
 
 @app.get("/products", response_model=List[ProductOut])
-def list_products(db: Session = Depends(get_db)):
+def list_products(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     rows = (
         db.query(Product)
         .join(Website, Product.website_id == Website.id)
@@ -380,7 +517,11 @@ def list_products(db: Session = Depends(get_db)):
 
 
 @app.post("/run-llm-check", response_model=LLMCheckResult)
-def run_llm_check(payload: LLMCheckRequest, db: Session = Depends(get_db)):
+def run_llm_check(
+    payload: LLMCheckRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -415,7 +556,9 @@ def run_llm_check(payload: LLMCheckRequest, db: Session = Depends(get_db)):
 
 
 @app.get("/prompt-packs", response_model=List[PromptPackSummary])
-def get_prompt_packs():
+def get_prompt_packs(
+    current_user: User = Depends(get_current_user),
+):
     packs_raw = list_prompt_packs()
     return [
         PromptPackSummary(
@@ -430,7 +573,11 @@ def get_prompt_packs():
 
 
 @app.post("/run-llm-batch", response_model=LLMRunBatchResult)
-def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
+def run_llm_batch(
+    payload: LLMRunBatchRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -532,6 +679,7 @@ def generate_prompt_pack(
     payload: GeneratePromptPackRequest,
     db: Session = Depends(get_db),
     request: Request = None,
+    current_user: User = Depends(get_current_user),
 ):
     """
     Source A: LLM-generated high-intent prompts (behavioural categories).
@@ -605,6 +753,7 @@ def generate_google_prompt_pack(
     payload: GenerateGooglePromptPackRequest,
     db: Session = Depends(get_db),
     request: Request = None,
+    current_user: User = Depends(get_current_user),
 ):
     """
     Source B: Google-seeded high-intent prompts (Scrapingdog 'people also ask').
@@ -683,6 +832,7 @@ async def visibility_report(
     payload: VisibilityReportRequest,
     db: Session = Depends(get_db),
     request: Request = None,
+    current_user: User = Depends(get_current_user),
 ):
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
@@ -760,9 +910,13 @@ async def visibility_report(
 
 
 @app.get("/download/prompt-pack/{pack_id}")
-def download_prompt_pack(pack_id: str):
+def download_prompt_pack(
+    pack_id: str,
+    current_user: User = Depends(get_current_user),
+):
     """
     Download a prompt pack JSON file by pack_id.
+    (Files are shared at filesystem level, but access is auth-protected.)
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
@@ -781,7 +935,10 @@ def download_prompt_pack(pack_id: str):
 
 
 @app.get("/download/report/{filename}")
-def download_report(filename: str):
+def download_report(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+):
     """
     Download a Markdown report file by filename.
     """
@@ -801,7 +958,11 @@ def download_report(filename: str):
 
 
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
-def prompt_stats(pack_id: str, db: Session = Depends(get_db)):
+def prompt_stats(
+    pack_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Returns per-prompt performance for a given pack_id (pack_key).
     """
