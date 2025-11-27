@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
+from app.models.prompt_models import PromptPack, Prompt
+from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import run_llm_visibility_check
 from app.services.prompt_packs import list_prompt_packs, load_prompt_pack
@@ -41,14 +43,14 @@ from app.services.visibility_report import (
 
 load_dotenv()
 
-app = FastAPI(title="LLM Visibility API", version="0.4.0")
+app = FastAPI(title="LLM Visibility API", version="0.5.0")
 
-# CORS setup
+#  CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://llm-visibility-frontend-production.up.railway.app"],  # or ["https://your-frontend.app"] for tighter security
+    allow_origins=["https://llm-visibility-frontend-production.up.railway.app"],
     allow_credentials=True,
-    allow_methods=["*"],  # allows OPTIONS, GET, POST, etc.
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -96,7 +98,7 @@ class ProductOut(BaseModel):
 class LLMCheckRequest(BaseModel):
     product_id: int
     prompt: str
-    model: Optional[str] = "gpt-4.1-mini"
+    model: Optional[str] = DEFAULT_LLM_MODEL
 
 
 class LLMCheckResult(BaseModel):
@@ -118,7 +120,7 @@ class PromptPackSummary(BaseModel):
 class LLMRunBatchRequest(BaseModel):
     product_id: int
     pack_id: str
-    model: Optional[str] = "gpt-4.1-mini"
+    model: Optional[str] = DEFAULT_LLM_MODEL
 
 
 class LLMRunBatchResult(BaseModel):
@@ -162,7 +164,7 @@ class GenerateGooglePromptPackResponse(BaseModel):
 
 class VisibilityReportRequest(BaseModel):
     product_id: int
-    model: Optional[str] = "gpt-4.1"
+    model: Optional[str] = DEFAULT_REPORT_MODEL
 
 
 class VisibilityReportResponse(BaseModel):
@@ -171,6 +173,15 @@ class VisibilityReportResponse(BaseModel):
     report_markdown: str
     file_path: str
     download_url: str
+
+
+class PromptPerformance(BaseModel):
+    prompt_id: int
+    index: int
+    text: str
+    total_runs: int
+    appeared_count: int
+    visibility_score: float
 
 
 # --- Endpoints ---
@@ -356,22 +367,59 @@ def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
     if not domain:
         raise HTTPException(status_code=400, detail="Invalid product URL domain")
 
+    # Load pack from JSON
     try:
-        pack = load_prompt_pack(payload.pack_id)
+        pack_data = load_prompt_pack(payload.pack_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    prompts = pack.get("prompts", [])
-    if not prompts:
+    prompts_list = pack_data.get("prompts", [])
+    if not prompts_list:
         raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
 
-    total = len(prompts)
+    total = len(prompts_list)
+
+    # Ensure PromptPack exists in DB
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == payload.pack_id)
+        .one_or_none()
+    )
+    if not db_pack:
+        db_pack = PromptPack(
+            pack_key=payload.pack_id,
+            name=pack_data.get("name"),
+            category=pack_data.get("category"),
+            source=pack_data.get("source") or "unknown",
+            language=pack_data.get("language", "en"),
+            product_id=product.id,
+        )
+        db.add(db_pack)
+        db.flush()
+
+    # Load existing Prompt rows for this pack
+    existing_prompts = {
+        p.index: p for p in db.query(Prompt).filter(Prompt.pack_id == db_pack.id).all()
+    }
+
     appeared_count = 0
     rows: List[LLMTest] = []
 
-    for prompt in prompts:
+    for idx, prompt_text in enumerate(prompts_list):
+        # Ensure Prompt row exists
+        prompt_row = existing_prompts.get(idx)
+        if not prompt_row:
+            prompt_row = Prompt(
+                pack_id=db_pack.id,
+                index=idx,
+                text=prompt_text,
+            )
+            db.add(prompt_row)
+            db.flush()
+            existing_prompts[idx] = prompt_row
+
         result = run_llm_visibility_check(
-            prompt=prompt,
+            prompt=prompt_text,
             domain=domain,
             model=payload.model,
         )
@@ -380,8 +428,10 @@ def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
 
         row = LLMTest(
             product_id=product.id,
+            pack_id=db_pack.id,
+            prompt_id=prompt_row.id,
             model_used=result["model"],
-            prompt=prompt,
+            prompt=prompt_text,
             appeared=result["appeared"],
             matched_domain=result["matched"] or None,
             snippet=result["snippet"],
@@ -405,7 +455,11 @@ def run_llm_batch(payload: LLMRunBatchRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/generate-prompt-pack", response_model=GeneratePromptPackResponse)
-def generate_prompt_pack(payload: GeneratePromptPackRequest, db: Session = Depends(get_db), request: Request = None,):
+def generate_prompt_pack(
+    payload: GeneratePromptPackRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
     """
     Source A: LLM-generated high-intent prompts (behavioural categories).
     """
@@ -425,9 +479,45 @@ def generate_prompt_pack(payload: GeneratePromptPackRequest, db: Session = Depen
         name=payload.name,
     )
 
+    # Save JSON file
     file_path = save_prompt_pack_to_file(pack)
     base_url = str(request.base_url).rstrip("/")
     download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
+
+    # --- Sync DB PromptPack + Prompt records ---
+    pack_key = pack["id"]
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == pack_key)
+        .one_or_none()
+    )
+    if not db_pack:
+        db_pack = PromptPack(
+            pack_key=pack_key,
+            name=pack.get("name"),
+            category=pack.get("category"),
+            source=pack.get("source") or "auto_generated_high_intent",
+            language=pack.get("language", "en"),
+            product_id=product.id,
+        )
+        db.add(db_pack)
+        db.flush()
+
+    # Clear existing prompts for this pack (if re-generating)
+    db.query(Prompt).filter(Prompt.pack_id == db_pack.id).delete()
+
+    prompts = pack.get("prompts", [])
+    for idx, text in enumerate(prompts):
+        db.add(
+            Prompt(
+                pack_id=db_pack.id,
+                index=idx,
+                text=text,
+            )
+        )
+
+    db.commit()
+    # --- End sync ---
 
     return GeneratePromptPackResponse(
         pack_id=pack["id"],
@@ -438,7 +528,11 @@ def generate_prompt_pack(payload: GeneratePromptPackRequest, db: Session = Depen
 
 
 @app.post("/generate-google-prompt-pack", response_model=GenerateGooglePromptPackResponse)
-def generate_google_prompt_pack(payload: GenerateGooglePromptPackRequest, db: Session = Depends(get_db), request: Request = None,):
+def generate_google_prompt_pack(
+    payload: GenerateGooglePromptPackRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
     """
     Source B: Google-seeded high-intent prompts (Scrapingdog 'people also ask').
     """
@@ -463,9 +557,45 @@ def generate_google_prompt_pack(payload: GenerateGooglePromptPackRequest, db: Se
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating Google prompt pack: {e}")
 
+    # Save JSON file
     file_path = save_prompt_pack_to_file(pack)
     base_url = str(request.base_url).rstrip("/")
     download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
+
+    # --- Sync DB PromptPack + Prompt records ---
+    pack_key = pack["id"]
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == pack_key)
+        .one_or_none()
+    )
+    if not db_pack:
+        db_pack = PromptPack(
+            pack_key=pack_key,
+            name=pack.get("name"),
+            category=pack.get("category"),
+            source=pack.get("source") or "google_people_also_ask",
+            language=pack.get("language", "en"),
+            product_id=product.id,
+        )
+        db.add(db_pack)
+        db.flush()
+
+    # Clear existing prompts for this pack (if re-generating)
+    db.query(Prompt).filter(Prompt.pack_id == db_pack.id).delete()
+
+    prompts = pack.get("prompts", [])
+    for idx, text in enumerate(prompts):
+        db.add(
+            Prompt(
+                pack_id=db_pack.id,
+                index=idx,
+                text=text,
+            )
+        )
+
+    db.commit()
+    # --- End sync ---
 
     return GenerateGooglePromptPackResponse(
         pack_id=pack["id"],
@@ -476,7 +606,11 @@ def generate_google_prompt_pack(payload: GenerateGooglePromptPackRequest, db: Se
 
 
 @app.post("/visibility-report", response_model=VisibilityReportResponse)
-async def visibility_report(payload: VisibilityReportRequest, db: Session = Depends(get_db), request: Request = None,):
+async def visibility_report(
+    payload: VisibilityReportRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+):
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -591,3 +725,45 @@ def download_report(filename: str):
         media_type="text/markdown",
         filename=filename,
     )
+
+
+@app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
+def prompt_stats(pack_id: str, db: Session = Depends(get_db)):
+    """
+    Returns per-prompt performance for a given pack_id (pack_key).
+    """
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == pack_id)
+        .one_or_none()
+    )
+    if not db_pack:
+        raise HTTPException(status_code=404, detail="Prompt pack not found in DB")
+
+    prompts = (
+        db.query(Prompt)
+        .filter(Prompt.pack_id == db_pack.id)
+        .order_by(Prompt.index)
+        .all()
+    )
+
+    results: List[PromptPerformance] = []
+
+    for prompt in prompts:
+        tests = db.query(LLMTest).filter(LLMTest.prompt_id == prompt.id).all()
+        total_runs = len(tests)
+        appeared_count = sum(1 for t in tests if t.appeared)
+        visibility_score = (appeared_count / total_runs) if total_runs > 0 else 0.0
+
+        results.append(
+            PromptPerformance(
+                prompt_id=prompt.id,
+                index=prompt.index,
+                text=prompt.text,
+                total_runs=total_runs,
+                appeared_count=appeared_count,
+                visibility_score=visibility_score,
+            )
+        )
+
+    return results

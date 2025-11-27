@@ -3,11 +3,13 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
 import os
 import json
+import re
 
 import httpx
 from bs4 import BeautifulSoup
@@ -20,7 +22,6 @@ from app.models.prompt_models import PromptPack, Prompt
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import run_llm_visibility_check
-from app.services.prompt_packs import list_prompt_packs, load_prompt_pack
 from app.services.prompt_generator import (
     generate_prompt_pack_for_product,
     save_prompt_pack_to_file,
@@ -55,22 +56,94 @@ app.add_middleware(
 )
 
 
-# --- DB Session Dependency ---
-def get_db():
+# ========= Multi-tenant helpers (schema-per-tenant) =========
+
+TENANT_HEADER = "X-Tenant"  # header that identifies the client/tenant
+
+
+def _normalize_schema_name(raw: str) -> str:
+    """
+    Turn a client identifier into a safe Postgres schema name.
+    Examples:
+      "demo_client"     -> "tenant_demo_client"
+      "tenant_client_b" -> "tenant_client_b" (kept as is)
+    """
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return "public"
+
+    if raw.startswith("tenant_"):
+        schema = raw
+    else:
+        schema = f"tenant_{raw}"
+
+    # basic safety check – only allow letters, digits, underscore
+    if not re.fullmatch(r"[a-zA-Z0-9_]+", schema):
+        raise HTTPException(status_code=400, detail="Invalid tenant name")
+
+    return schema
+
+
+def _ensure_tenant_schema(schema: str):
+    """
+    Make sure the tenant schema exists and has all tables.
+    Idempotent – safe to call often.
+    """
+    if schema == "public":
+        # public gets its tables created at startup
+        return
+
+    # Use a raw connection so we can control search_path for create_all
+    with engine.connect() as conn:
+        # 1) Create schema if missing
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+
+        # 2) Set search_path so create_all builds tables in this schema
+        conn.execute(text(f'SET search_path TO "{schema}"'))
+
+        # 3) Create tables for this schema (if not present)
+        Base.metadata.create_all(bind=conn)
+
+        conn.commit()
+
+
+def get_tenant_schema(request: Request) -> str:
+    """
+    Read tenant from header and normalise to schema name.
+    If header missing, fall back to 'public'.
+    """
+    raw_tenant = request.headers.get(TENANT_HEADER)
+    return _normalize_schema_name(raw_tenant or "")
+
+
+# --- DB Session Dependency (now tenant-aware) ---
+def get_db(request: Request):
+    """
+    Open a DB session scoped to the tenant's schema using search_path.
+    """
     db = SessionLocal()
     try:
+        schema = get_tenant_schema(request)
+
+        # Ensure schema + tables exist
+        _ensure_tenant_schema(schema)
+
+        # Set search_path on this session so all queries are schema-scoped
+        db.execute(text(f'SET search_path TO "{schema}"'))
+
         yield db
     finally:
         db.close()
 
 
-# --- Create tables on startup ---
+# --- Create tables on startup (public schema only) ---
 @app.on_event("startup")
 def on_startup():
+    # Base public schema – useful for default/demo tenant
     Base.metadata.create_all(bind=engine)
 
 
-# --- Schemas ---
+# --- Schemas (Pydantic models) ---
 
 class AnalyzeRequest(BaseModel):
     url: HttpUrl
