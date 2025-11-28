@@ -52,7 +52,7 @@ from app.services.auth_utils import (
 
 load_dotenv()
 
-app = FastAPI(title="LLM Visibility API", version="0.6.0")
+app = FastAPI(title="LLM Visibility API", version="0.7.0")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
@@ -70,6 +70,112 @@ app.add_middleware(
 
 TENANT_HEADER = "X-Tenant"  # header that identifies the client/tenant
 
+# For registration-time validation of client codes
+TENANT_CODE_REGEX = re.compile(r"^[a-z0-9_]{3,32}$")
+
+
+def normalize_and_validate_tenant_code(raw_code: str) -> str:
+    """
+    Normalise and validate a tenant code that the client enters at registration.
+
+    Rules:
+    - lowercase
+    - 3–32 chars
+    - only a–z, 0–9, underscore
+    - must NOT start with 'tenant_'
+    - cannot be 'public'
+    """
+    if not raw_code:
+        raise HTTPException(status_code=400, detail="Tenant code is required")
+
+    code = raw_code.strip().lower()
+
+    if code.startswith("tenant_"):
+        raise HTTPException(
+            status_code=400,
+            detail="Tenant code should not start with 'tenant_'. Just use the short code, e.g. 'acme_client'.",
+        )
+
+    if not TENANT_CODE_REGEX.fullmatch(code):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid tenant code. Use 3–32 characters: lowercase letters, numbers and underscore only.",
+        )
+
+    if code == "public":
+        raise HTTPException(
+            status_code=400,
+            detail="This tenant code is reserved. Please choose a different one.",
+        )
+
+    return code
+
+
+def schema_name_for_tenant(code: str) -> str:
+    """
+    Our convention: tenant code 'test_client' -> schema 'tenant_test_client'
+    """
+    return f"tenant_{code}"
+
+
+def provision_new_tenant(
+    tenant_code: str,
+    admin_email: str,
+    admin_password: str,
+) -> str:
+    """
+    Creates:
+    - schema: tenant_<code>
+    - all tables in that schema (using Base.metadata)
+    - an admin user in that schema
+
+    Returns the schema name.
+    """
+    # Validate & normalise code
+    code = normalize_and_validate_tenant_code(tenant_code)
+    schema_name = schema_name_for_tenant(code)
+
+    # 1) Check if schema already exists
+    with engine.connect() as conn:
+        existing = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.schemata WHERE schema_name = :name"
+            ),
+            {"name": schema_name},
+        ).scalar()
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail="That tenant code is already in use. Please choose another.",
+            )
+
+    # 2) Create schema + tables + admin user in a single transaction
+    hashed = hash_password(admin_password)
+
+    # Use a transactional connection
+    with engine.begin() as conn:
+        # Create schema
+        conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+
+        # Set search_path so all DDL/DML go into this schema
+        conn.execute(text(f'SET search_path TO "{schema_name}"'))
+
+        # Create all tables defined on Base in this schema
+        Base.metadata.create_all(bind=conn)
+
+        # Insert the initial admin user into this tenant's users table
+        conn.execute(
+            text(
+                """
+                INSERT INTO users (email, hashed_password, is_active, is_admin, created_at)
+                VALUES (:email, :hashed_password, TRUE, TRUE, NOW())
+                """
+            ),
+            {"email": admin_email, "hashed_password": hashed},
+        )
+
+    return schema_name
+
 
 def _normalize_schema_name(raw: str) -> str:
     """
@@ -77,6 +183,8 @@ def _normalize_schema_name(raw: str) -> str:
     Examples:
       "demo_client"     -> "tenant_demo_client"
       "tenant_client_b" -> "tenant_client_b" (kept as is)
+
+    This is used for request-time routing via the X-Tenant header.
     """
     raw = (raw or "").strip().lower()
     if not raw:
@@ -294,6 +402,21 @@ class LoginRequest(BaseModel):
     password: str
 
 
+# ----- Client registration models -----
+
+class ClientRegistrationRequest(BaseModel):
+    tenant_code: str   # what the client will type, e.g. "test_client"
+    admin_email: EmailStr
+    admin_password: str
+
+
+class ClientRegistrationResponse(BaseModel):
+    tenant_code: str
+    schema_name: str
+    admin_email: EmailStr
+    message: str
+
+
 # ----- Auth helpers (dependencies) -----
 
 def get_current_user(
@@ -332,6 +455,46 @@ def health():
     return JSONResponse({"status": "ok"})
 
 
+# ----- Client registration endpoint -----
+
+@app.post("/auth/register-client", response_model=ClientRegistrationResponse)
+def register_client(payload: ClientRegistrationRequest):
+    """
+    Public endpoint: a new client can self-register.
+
+    Behaviour:
+    - Validates tenant_code format
+    - Checks if tenant_code/schema already exists
+    - Creates schema + tables for this tenant
+    - Creates an admin user in that schema
+
+    The client will then use:
+      - tenant_code (e.g. 'test_client')
+      - admin_email
+      - admin_password
+    on the normal /auth/login endpoint, with X-Tenant set to tenant_code.
+    """
+    # We validate and normalise inside provision_new_tenant
+    schema_name = provision_new_tenant(
+        tenant_code=payload.tenant_code,
+        admin_email=payload.admin_email,
+        admin_password=payload.admin_password,
+    )
+
+    # Return the normalised tenant code as well
+    code = normalize_and_validate_tenant_code(payload.tenant_code)
+
+    return ClientRegistrationResponse(
+        tenant_code=code,
+        schema_name=schema_name,
+        admin_email=payload.admin_email,
+        message=(
+            "Workspace created successfully. "
+            "You can now log in using this tenant code, email and password."
+        ),
+    )
+
+
 # ----- Auth endpoints -----
 
 @app.post("/auth/register-admin", response_model=UserOut)
@@ -341,8 +504,8 @@ def register_admin(
     request: Request = None,
 ):
     """
-    Creates the FIRST admin user for the current tenant (schema defined by X-Tenant header).
-    You can later restrict this endpoint or remove it in production.
+    Creates an admin user for the current tenant (schema defined by X-Tenant header).
+    You can later restrict or remove this endpoint in production.
     """
     existing = db.query(User).filter(User.email == payload.email).one_or_none()
     if existing:
@@ -380,7 +543,7 @@ def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User is inactive")
 
-    # Get tenant code from header to embed in the token (optional for now)
+    # Get tenant code from header to embed in the token (optional)
     tenant_raw = request.headers.get(TENANT_HEADER) or ""
     tenant_code = tenant_raw.strip() or "public"
 
