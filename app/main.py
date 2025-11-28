@@ -204,25 +204,32 @@ def _normalize_schema_name(raw: str) -> str:
 
 def _ensure_tenant_schema(schema: str):
     """
-    Make sure the tenant schema exists and has all tables.
-    Idempotent – safe to call often.
+    Ensure the tenant schema exists.
+
+    IMPORTANT:
+    - This NO LONGER creates schemas or tables.
+    - New schemas are provisioned ONLY via `provision_new_tenant`
+      (used by /auth/register-client).
     """
     if schema == "public":
         # public gets its tables created at startup
         return
 
-    # Use a raw connection so we can control search_path for create_all
     with engine.connect() as conn:
-        # 1) Create schema if missing
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+        exists = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.schemata "
+                "WHERE schema_name = :name"
+            ),
+            {"name": schema},
+        ).scalar()
 
-        # 2) Set search_path so create_all builds tables in this schema
-        conn.execute(text(f'SET search_path TO "{schema}"'))
-
-        # 3) Create tables for this schema (if not present)
-        Base.metadata.create_all(bind=conn)
-
-        conn.commit()
+    if not exists:
+        # Unknown / unprovisioned tenant
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown workspace / tenant. Please check your tenant code.",
+        )
 
 
 def get_tenant_schema(request: Request) -> str:
@@ -238,12 +245,16 @@ def get_tenant_schema(request: Request) -> str:
 def get_db(request: Request):
     """
     Open a DB session scoped to the tenant's schema using search_path.
+
+    NOTE:
+    - This will now ONLY work for existing, provisioned schemas.
+    - New schemas are created via /auth/register-client (provision_new_tenant).
     """
     db = SessionLocal()
     try:
         schema = get_tenant_schema(request)
 
-        # Ensure schema + tables exist
+        # Ensure the schema already exists (no auto-creation here)
         _ensure_tenant_schema(schema)
 
         # Set search_path on this session so all queries are schema-scoped
