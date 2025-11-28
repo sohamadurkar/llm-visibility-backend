@@ -32,7 +32,6 @@ from app.services.google_prompt_generator import (
     generate_google_prompt_pack_for_product,
 )
 from app.services.prompt_packs import (
-    list_prompt_packs,
     load_prompt_pack,
     PROMPT_PACKS_DIR,
 )
@@ -737,19 +736,28 @@ def run_llm_check(
 
 @app.get("/prompt-packs", response_model=List[PromptPackSummary])
 def get_prompt_packs(
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    packs_raw = list_prompt_packs()
-    return [
-        PromptPackSummary(
-            id=p["id"],
-            name=p["name"],
-            category=p.get("category"),
-            language=p.get("language"),
-            num_prompts=p.get("num_prompts", 0),
+    """
+    List prompt packs for the CURRENT TENANT ONLY.
+    Uses the tenant-scoped DB (schema set by get_db).
+    """
+    db_packs = db.query(PromptPack).all()
+
+    results: List[PromptPackSummary] = []
+    for pack in db_packs:
+        num_prompts = len(pack.prompts) if pack.prompts is not None else 0
+        results.append(
+            PromptPackSummary(
+                id=pack.pack_key,
+                name=pack.name or pack.pack_key,
+                category=pack.category,
+                language=pack.language,
+                num_prompts=num_prompts,
+            )
         )
-        for p in packs_raw
-    ]
+    return results
 
 
 @app.post("/run-llm-batch", response_model=LLMRunBatchResult)
@@ -1092,14 +1100,28 @@ async def visibility_report(
 @app.get("/download/prompt-pack/{pack_id}")
 def download_prompt_pack(
     pack_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Download a prompt pack JSON file by pack_id.
-    (Files are shared at filesystem level, but access is auth-protected.)
+
+    Now tenant-safe:
+    - First checks that a PromptPack with this pack_key exists
+      in the CURRENT tenant schema.
+    - Only then serves the JSON file from disk.
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
+
+    # Ensure this pack belongs to the current tenant
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == pack_id)
+        .one_or_none()
+    )
+    if not db_pack:
+        raise HTTPException(status_code=404, detail="Prompt pack not found in this workspace")
 
     fname = f"{pack_id}.json"
     fpath = os.path.join(PROMPT_PACKS_DIR, fname)
