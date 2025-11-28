@@ -654,13 +654,19 @@ async def analyze_website(
         product.has_product_jsonld = has_product_jsonld
         product.last_checked = datetime.utcnow()
 
+    # Cache values BEFORE commit to avoid ObjectDeletedError / lazy reload issues
+    website_domain_value = website.domain
+    product_url_value = product.url
+    has_product_jsonld_value = has_product_jsonld
+    page_title_value = page_title
+
     db.commit()
 
     return AnalyzeResult(
-        website_domain=website.domain,
-        product_url=product.url,
-        page_title=page_title,
-        has_product_jsonld=has_product_jsonld,
+        website_domain=website_domain_value,
+        product_url=product_url_value,
+        page_title=page_title_value,
+        has_product_jsonld=has_product_jsonld_value,
     )
 
 
