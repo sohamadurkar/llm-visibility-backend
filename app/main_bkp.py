@@ -32,7 +32,6 @@ from app.services.google_prompt_generator import (
     generate_google_prompt_pack_for_product,
 )
 from app.services.prompt_packs import (
-    list_prompt_packs,
     load_prompt_pack,
     PROMPT_PACKS_DIR,
 )
@@ -52,11 +51,11 @@ from app.services.auth_utils import (
 
 load_dotenv()
 
-app = FastAPI(title="LLM Visibility API", version="0.6.0")
+app = FastAPI(title="LLM Visibility API", version="0.7.0")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-#  CORS setup
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://llm-visibility-frontend-production.up.railway.app"],
@@ -70,6 +69,112 @@ app.add_middleware(
 
 TENANT_HEADER = "X-Tenant"  # header that identifies the client/tenant
 
+# For registration-time validation of client codes
+TENANT_CODE_REGEX = re.compile(r"^[a-z0-9_]{3,32}$")
+
+
+def normalize_and_validate_tenant_code(raw_code: str) -> str:
+    """
+    Normalise and validate a tenant code that the client enters at registration.
+
+    Rules:
+    - lowercase
+    - 3–32 chars
+    - only a–z, 0–9, underscore
+    - must NOT start with 'tenant_'
+    - cannot be 'public'
+    """
+    if not raw_code:
+        raise HTTPException(status_code=400, detail="Tenant code is required")
+
+    code = raw_code.strip().lower()
+
+    if code.startswith("tenant_"):
+        raise HTTPException(
+            status_code=400,
+            detail="Tenant code should not start with 'tenant_'. Just use the short code, e.g. 'acme_client'.",
+        )
+
+    if not TENANT_CODE_REGEX.fullmatch(code):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid tenant code. Use 3–32 characters: lowercase letters, numbers and underscore only.",
+        )
+
+    if code == "public":
+        raise HTTPException(
+            status_code=400,
+            detail="This tenant code is reserved. Please choose a different one.",
+        )
+
+    return code
+
+
+def schema_name_for_tenant(code: str) -> str:
+    """
+    Our convention: tenant code 'test_client' -> schema 'tenant_test_client'
+    """
+    return f"tenant_{code}"
+
+
+def provision_new_tenant(
+    tenant_code: str,
+    admin_email: str,
+    admin_password: str,
+) -> str:
+    """
+    Creates:
+    - schema: tenant_<code>
+    - all tables in that schema (using Base.metadata)
+    - an admin user in that schema
+
+    Returns the schema name.
+    """
+    # Validate & normalise code
+    code = normalize_and_validate_tenant_code(tenant_code)
+    schema_name = schema_name_for_tenant(code)
+
+    # 1) Check if schema already exists
+    with engine.connect() as conn:
+        existing = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.schemata WHERE schema_name = :name"
+            ),
+            {"name": schema_name},
+        ).scalar()
+        if existing:
+            raise HTTPException(
+                status_code=400,
+                detail="That tenant code is already in use. Please choose another.",
+            )
+
+    # 2) Create schema + tables + admin user in a single transaction
+    hashed = hash_password(admin_password)
+
+    # Use a transactional connection
+    with engine.begin() as conn:
+        # Create schema
+        conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+
+        # Set search_path so all DDL/DML go into this schema
+        conn.execute(text(f'SET search_path TO "{schema_name}"'))
+
+        # Create all tables defined on Base in this schema
+        Base.metadata.create_all(bind=conn)
+
+        # Insert the initial admin user into this tenant's users table
+        conn.execute(
+            text(
+                """
+                INSERT INTO users (email, hashed_password, is_active, is_admin, created_at)
+                VALUES (:email, :hashed_password, TRUE, TRUE, NOW())
+                """
+            ),
+            {"email": admin_email, "hashed_password": hashed},
+        )
+
+    return schema_name
+
 
 def _normalize_schema_name(raw: str) -> str:
     """
@@ -77,6 +182,8 @@ def _normalize_schema_name(raw: str) -> str:
     Examples:
       "demo_client"     -> "tenant_demo_client"
       "tenant_client_b" -> "tenant_client_b" (kept as is)
+
+    This is used for request-time routing via the X-Tenant header.
     """
     raw = (raw or "").strip().lower()
     if not raw:
@@ -96,25 +203,32 @@ def _normalize_schema_name(raw: str) -> str:
 
 def _ensure_tenant_schema(schema: str):
     """
-    Make sure the tenant schema exists and has all tables.
-    Idempotent – safe to call often.
+    Ensure the tenant schema exists.
+
+    IMPORTANT:
+    - This NO LONGER creates schemas or tables.
+    - New schemas are provisioned ONLY via `provision_new_tenant`
+      (used by /auth/register-client).
     """
     if schema == "public":
         # public gets its tables created at startup
         return
 
-    # Use a raw connection so we can control search_path for create_all
     with engine.connect() as conn:
-        # 1) Create schema if missing
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+        exists = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.schemata "
+                "WHERE schema_name = :name"
+            ),
+            {"name": schema},
+        ).scalar()
 
-        # 2) Set search_path so create_all builds tables in this schema
-        conn.execute(text(f'SET search_path TO "{schema}"'))
-
-        # 3) Create tables for this schema (if not present)
-        Base.metadata.create_all(bind=conn)
-
-        conn.commit()
+    if not exists:
+        # Unknown / unprovisioned tenant
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown workspace / tenant. Please check your tenant code.",
+        )
 
 
 def get_tenant_schema(request: Request) -> str:
@@ -130,12 +244,16 @@ def get_tenant_schema(request: Request) -> str:
 def get_db(request: Request):
     """
     Open a DB session scoped to the tenant's schema using search_path.
+
+    NOTE:
+    - This will now ONLY work for existing, provisioned schemas.
+    - New schemas are created via /auth/register-client (provision_new_tenant).
     """
     db = SessionLocal()
     try:
         schema = get_tenant_schema(request)
 
-        # Ensure schema + tables exist
+        # Ensure the schema already exists (no auto-creation here)
         _ensure_tenant_schema(schema)
 
         # Set search_path on this session so all queries are schema-scoped
@@ -294,6 +412,21 @@ class LoginRequest(BaseModel):
     password: str
 
 
+# ----- Client registration models -----
+
+class ClientRegistrationRequest(BaseModel):
+    tenant_code: str   # what the client will type, e.g. "test_client"
+    admin_email: EmailStr
+    admin_password: str
+
+
+class ClientRegistrationResponse(BaseModel):
+    tenant_code: str
+    schema_name: str
+    admin_email: EmailStr
+    message: str
+
+
 # ----- Auth helpers (dependencies) -----
 
 def get_current_user(
@@ -332,6 +465,46 @@ def health():
     return JSONResponse({"status": "ok"})
 
 
+# ----- Client registration endpoint -----
+
+@app.post("/auth/register-client", response_model=ClientRegistrationResponse)
+def register_client(payload: ClientRegistrationRequest):
+    """
+    Public endpoint: a new client can self-register.
+
+    Behaviour:
+    - Validates tenant_code format
+    - Checks if tenant_code/schema already exists
+    - Creates schema + tables for this tenant
+    - Creates an admin user in that schema
+
+    The client will then use:
+      - tenant_code (e.g. 'test_client')
+      - admin_email
+      - admin_password
+    on the normal /auth/login endpoint, with X-Tenant set to tenant_code.
+    """
+    # We validate and normalise inside provision_new_tenant
+    schema_name = provision_new_tenant(
+        tenant_code=payload.tenant_code,
+        admin_email=payload.admin_email,
+        admin_password=payload.admin_password,
+    )
+
+    # Return the normalised tenant code as well
+    code = normalize_and_validate_tenant_code(payload.tenant_code)
+
+    return ClientRegistrationResponse(
+        tenant_code=code,
+        schema_name=schema_name,
+        admin_email=payload.admin_email,
+        message=(
+            "Workspace created successfully. "
+            "You can now log in using this tenant code, email and password."
+        ),
+    )
+
+
 # ----- Auth endpoints -----
 
 @app.post("/auth/register-admin", response_model=UserOut)
@@ -341,8 +514,8 @@ def register_admin(
     request: Request = None,
 ):
     """
-    Creates the FIRST admin user for the current tenant (schema defined by X-Tenant header).
-    You can later restrict this endpoint or remove it in production.
+    Creates an admin user for the current tenant (schema defined by X-Tenant header).
+    You can later restrict or remove this endpoint in production.
     """
     existing = db.query(User).filter(User.email == payload.email).one_or_none()
     if existing:
@@ -380,7 +553,7 @@ def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User is inactive")
 
-    # Get tenant code from header to embed in the token (optional for now)
+    # Get tenant code from header to embed in the token (optional)
     tenant_raw = request.headers.get(TENANT_HEADER) or ""
     tenant_code = tenant_raw.strip() or "public"
 
@@ -480,13 +653,19 @@ async def analyze_website(
         product.has_product_jsonld = has_product_jsonld
         product.last_checked = datetime.utcnow()
 
+    # Cache values BEFORE commit to avoid ObjectDeletedError / lazy reload issues
+    website_domain_value = website.domain
+    product_url_value = product.url
+    has_product_jsonld_value = has_product_jsonld
+    page_title_value = page_title
+
     db.commit()
 
     return AnalyzeResult(
-        website_domain=website.domain,
-        product_url=product.url,
-        page_title=page_title,
-        has_product_jsonld=has_product_jsonld,
+        website_domain=website_domain_value,
+        product_url=product_url_value,
+        page_title=page_title_value,
+        has_product_jsonld=has_product_jsonld_value,
     )
 
 
@@ -557,19 +736,28 @@ def run_llm_check(
 
 @app.get("/prompt-packs", response_model=List[PromptPackSummary])
 def get_prompt_packs(
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    packs_raw = list_prompt_packs()
-    return [
-        PromptPackSummary(
-            id=p["id"],
-            name=p["name"],
-            category=p.get("category"),
-            language=p.get("language"),
-            num_prompts=p.get("num_prompts", 0),
+    """
+    List prompt packs for the CURRENT TENANT ONLY.
+    Uses the tenant-scoped DB (schema set by get_db).
+    """
+    db_packs = db.query(PromptPack).all()
+
+    results: List[PromptPackSummary] = []
+    for pack in db_packs:
+        num_prompts = len(pack.prompts) if pack.prompts is not None else 0
+        results.append(
+            PromptPackSummary(
+                id=pack.pack_key,
+                name=pack.name or pack.pack_key,
+                category=pack.category,
+                language=pack.language,
+                num_prompts=num_prompts,
+            )
         )
-        for p in packs_raw
-    ]
+    return results
 
 
 @app.post("/run-llm-batch", response_model=LLMRunBatchResult)
@@ -912,14 +1100,28 @@ async def visibility_report(
 @app.get("/download/prompt-pack/{pack_id}")
 def download_prompt_pack(
     pack_id: str,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Download a prompt pack JSON file by pack_id.
-    (Files are shared at filesystem level, but access is auth-protected.)
+
+    Now tenant-safe:
+    - First checks that a PromptPack with this pack_key exists
+      in the CURRENT tenant schema.
+    - Only then serves the JSON file from disk.
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
+
+    # Ensure this pack belongs to the current tenant
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == pack_id)
+        .one_or_none()
+    )
+    if not db_pack:
+        raise HTTPException(status_code=404, detail="Prompt pack not found in this workspace")
 
     fname = f"{pack_id}.json"
     fpath = os.path.join(PROMPT_PACKS_DIR, fname)

@@ -1101,12 +1101,11 @@ async def visibility_report(
 def download_prompt_pack(
     pack_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """
     Download a prompt pack JSON file by pack_id.
 
-    Now tenant-safe:
+    Tenant-safe:
     - First checks that a PromptPack with this pack_key exists
       in the CURRENT tenant schema.
     - Only then serves the JSON file from disk.
@@ -1139,7 +1138,6 @@ def download_prompt_pack(
 @app.get("/download/report/{filename}")
 def download_report(
     filename: str,
-    current_user: User = Depends(get_current_user),
 ):
     """
     Download a Markdown report file by filename.
