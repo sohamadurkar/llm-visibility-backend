@@ -18,9 +18,10 @@ from dotenv import load_dotenv
 
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
-from app.models.llmtest import LLMTest, LLMBatchRun
+from app.models.llmtest import LLMTest
 from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
+from app.models.llm_batch_run import LLMBatchRun  # ✅ NEW
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import run_llm_visibility_check
@@ -264,11 +265,31 @@ def get_db(request: Request):
         db.close()
 
 
-# --- Create tables on startup (public schema only) ---
+# --- Create tables on startup (public + all tenant_* schemas) ---
 @app.on_event("startup")
 def on_startup():
-    # Base public schema – useful for default/demo tenant
+    """
+    Ensure all tables exist in:
+    - public schema
+    - every tenant_* schema
+    """
+
+    # 1) Public schema – useful for default/demo tenant
     Base.metadata.create_all(bind=engine)
+
+    # 2) All tenant_* schemas – keep existing tenants up-to-date
+    with engine.begin() as conn:
+        tenant_schemas = conn.execute(
+            text(
+                "SELECT schema_name FROM information_schema.schemata "
+                "WHERE schema_name LIKE 'tenant_%'"
+            )
+        ).scalars().all()
+
+        for schema in tenant_schemas:
+            # Set search_path so create_all targets this tenant schema
+            conn.execute(text(f'SET search_path TO "{schema}"'))
+            Base.metadata.create_all(bind=conn)
 
 
 # --- Schemas (Pydantic models) ---
@@ -846,30 +867,27 @@ def run_llm_batch(
         )
         rows.append(row)
 
-    # Compute aggregate metrics
     visibility_score = appeared_count / total if total > 0 else 0.0
-    model_used = payload.model or DEFAULT_LLM_MODEL
 
-    # Persist all LLMTest rows + a single LLMBatchRun summary row
+    # Persist per-prompt results + one batch summary row
     if rows:
         db.add_all(rows)
 
     batch_run = LLMBatchRun(
         product_id=product.id,
         pack_id=db_pack.id,
-        model_used=model_used,
+        model_used=payload.model or DEFAULT_LLM_MODEL,
         total_prompts=total,
         appeared_count=appeared_count,
         visibility_score=visibility_score,
     )
     db.add(batch_run)
-
     db.commit()
 
     return LLMRunBatchResult(
         product_id=product.id,
         pack_id=payload.pack_id,
-        model_used=model_used,
+        model_used=payload.model or DEFAULT_LLM_MODEL,
         total_prompts=total,
         appeared_count=appeared_count,
         visibility_score=visibility_score,
