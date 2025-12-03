@@ -183,7 +183,7 @@ def _normalize_schema_name(raw: str) -> str:
       "demo_client"     -> "tenant_demo_client"
       "tenant_client_b" -> "tenant_client_b" (kept as is)
 
-    This is used for request-time routing via the X-Tenant header.
+    This is used for request-time routing via headers / token.
     """
     raw = (raw or "").strip().lower()
     if not raw:
@@ -233,11 +233,35 @@ def _ensure_tenant_schema(schema: str):
 
 def get_tenant_schema(request: Request) -> str:
     """
-    Read tenant from header and normalise to schema name.
-    If header missing, fall back to 'public'.
+    Determine tenant schema for this request.
+
+    Priority:
+    1. X-Tenant header (raw code or full 'tenant_xxx')
+    2. 'tenant' claim inside JWT access token
+    3. Fallback to 'public'
     """
+    # 1) Explicit header wins
     raw_tenant = request.headers.get(TENANT_HEADER)
-    return _normalize_schema_name(raw_tenant or "")
+    if raw_tenant:
+        return _normalize_schema_name(raw_tenant)
+
+    # 2) Fallback: derive from JWT token, if present
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+        try:
+            from jose import JWTError  # local import to avoid circular issues
+
+            payload = decode_access_token(token)
+            tenant_claim = payload.get("tenant")
+            if tenant_claim:
+                return _normalize_schema_name(tenant_claim)
+        except Exception:
+            # On any failure, we silently ignore and fall back to public
+            pass
+
+    # 3) Default
+    return "public"
 
 
 # --- DB Session Dependency (now tenant-aware) ---
@@ -803,7 +827,7 @@ def run_llm_batch(
 
     prompts_list = pack_data.get("prompts", [])
     if not prompts_list:
-        raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
+        raise HTTPException(status_status_code=400, detail="Prompt pack has no prompts")
 
     total = len(prompts_list)
 
@@ -1169,7 +1193,7 @@ def download_report(
     Download a Markdown report file by filename.
     """
     if ".." in filename or "/" in filename or "\\" in filename:
-        raise HTTPException(status_code=400, detail="Invalid filename")
+        raise HTTPException(status=status_code=400, detail="Invalid filename")
 
     fpath = os.path.join(REPORTS_DIR, filename)
 
