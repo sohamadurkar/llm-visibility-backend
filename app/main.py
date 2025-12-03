@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
-from app.models.llmtest import LLMTest
+from app.models.llmtest import LLMTest, LLMBatchRun
 from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
@@ -846,16 +846,30 @@ def run_llm_batch(
         )
         rows.append(row)
 
+    # Compute aggregate metrics
+    visibility_score = appeared_count / total if total > 0 else 0.0
+    model_used = payload.model or DEFAULT_LLM_MODEL
+
+    # Persist all LLMTest rows + a single LLMBatchRun summary row
     if rows:
         db.add_all(rows)
-        db.commit()
 
-    visibility_score = appeared_count / total if total > 0 else 0.0
+    batch_run = LLMBatchRun(
+        product_id=product.id,
+        pack_id=db_pack.id,
+        model_used=model_used,
+        total_prompts=total,
+        appeared_count=appeared_count,
+        visibility_score=visibility_score,
+    )
+    db.add(batch_run)
+
+    db.commit()
 
     return LLMRunBatchResult(
         product_id=product.id,
         pack_id=payload.pack_id,
-        model_used=payload.model,
+        model_used=model_used,
         total_prompts=total,
         appeared_count=appeared_count,
         visibility_score=visibility_score,

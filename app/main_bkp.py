@@ -1100,28 +1100,17 @@ async def visibility_report(
 @app.get("/download/prompt-pack/{pack_id}")
 def download_prompt_pack(
     pack_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """
     Download a prompt pack JSON file by pack_id.
 
-    Now tenant-safe:
-    - First checks that a PromptPack with this pack_key exists
-      in the CURRENT tenant schema.
-    - Only then serves the JSON file from disk.
+    Note:
+    - We do not enforce a tenant DB check here because the browser
+      cannot send the X-Tenant header on a normal link click.
+    - We still validate the pack_id to avoid path traversal.
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
-
-    # Ensure this pack belongs to the current tenant
-    db_pack = (
-        db.query(PromptPack)
-        .filter(PromptPack.pack_key == pack_id)
-        .one_or_none()
-    )
-    if not db_pack:
-        raise HTTPException(status_code=404, detail="Prompt pack not found in this workspace")
 
     fname = f"{pack_id}.json"
     fpath = os.path.join(PROMPT_PACKS_DIR, fname)
@@ -1139,7 +1128,6 @@ def download_prompt_pack(
 @app.get("/download/report/{filename}")
 def download_report(
     filename: str,
-    current_user: User = Depends(get_current_user),
 ):
     """
     Download a Markdown report file by filename.
