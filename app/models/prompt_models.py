@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -22,7 +22,7 @@ class PromptPack(Base):
     source = Column(String, nullable=True)   # e.g. "auto_generated_high_intent", "google_people_also_ask"
     language = Column(String, default="en")
 
-    # Optional link to the product the pack was generated for
+    #  Optional link to the product the pack was generated for
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -53,38 +53,3 @@ class Prompt(Base):
 
     pack = relationship("PromptPack", back_populates="prompts")
     tests = relationship("LLMTest", back_populates="prompt_obj")
-
-
-class BatchRun(Base):
-    """
-    Stores aggregate metrics for each LLM batch visibility run.
-
-    One row is inserted per /run-llm-batch execution, per tenant.
-    """
-    __tablename__ = "batch_runs"
-
-    id = Column(Integer, primary_key=True, index=True)
-
-    # Which product this batch run was for
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
-
-    # Link to the DB prompt pack (numeric PK)
-    prompt_pack_id = Column(Integer, ForeignKey("prompt_packs.id"), nullable=False)
-
-    # Snapshot of the external pack identifier (same as PromptPack.pack_key / pack["id"])
-    prompt_pack_key = Column(String, nullable=False)
-
-    # Snapshot of the pack name at the time of the run
-    prompt_pack_name = Column(String, nullable=True)
-
-    # Metrics
-    total_prompts = Column(Integer, nullable=False)
-    appeared_count = Column(Integer, nullable=False)
-
-    # Visibility score as a percentage (0–100)
-    visibility_score_percent = Column(Float, nullable=False)
-
-    # Model used for this batch run (e.g. "gpt-5.1")
-    model_used = Column(String, nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow)

@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
-from app.models.prompt_models import PromptPack, Prompt, BatchRun
+from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
@@ -55,7 +55,7 @@ app = FastAPI(title="LLM Visibility API", version="0.7.0")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-#  CORS setup
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://llm-visibility-frontend-production.up.railway.app"],
@@ -846,34 +846,16 @@ def run_llm_batch(
         )
         rows.append(row)
 
-    # Compute metrics
-    visibility_score = appeared_count / total if total > 0 else 0.0
-    visibility_score_percent = visibility_score * 100.0
-    model_used_for_batch = payload.model or DEFAULT_LLM_MODEL
-
     if rows:
-        # Store individual LLMTest rows
         db.add_all(rows)
-
-        # Store aggregate batch metrics as a single row
-        batch_row = BatchRun(
-            product_id=product.id,
-            prompt_pack_id=db_pack.id,
-            prompt_pack_key=payload.pack_id,
-            prompt_pack_name=db_pack.name,
-            total_prompts=total,
-            appeared_count=appeared_count,
-            visibility_score_percent=visibility_score_percent,
-            model_used=model_used_for_batch,
-        )
-        db.add(batch_row)
-
         db.commit()
+
+    visibility_score = appeared_count / total if total > 0 else 0.0
 
     return LLMRunBatchResult(
         product_id=product.id,
         pack_id=payload.pack_id,
-        model_used=model_used_for_batch,
+        model_used=payload.model,
         total_prompts=total,
         appeared_count=appeared_count,
         visibility_score=visibility_score,
