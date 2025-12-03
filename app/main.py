@@ -827,7 +827,7 @@ def run_llm_batch(
 
     prompts_list = pack_data.get("prompts", [])
     if not prompts_list:
-        raise HTTPException(status_status_code=400, detail="Prompt pack has no prompts")
+        raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
 
     total = len(prompts_list)
 
@@ -1193,7 +1193,7 @@ def download_report(
     Download a Markdown report file by filename.
     """
     if ".." in filename or "/" in filename or "\\" in filename:
-        raise HTTPException(status=status_code=400, detail="Invalid filename")
+        raise HTTPException(status_code=400, detail="Invalid filename")
 
     fpath = os.path.join(REPORTS_DIR, filename)
 
