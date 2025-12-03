@@ -21,7 +21,6 @@ from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
 from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
-from app.models import LLMBatchRun  # ✅ NEW
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import run_llm_visibility_check
