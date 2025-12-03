@@ -264,11 +264,31 @@ def get_db(request: Request):
         db.close()
 
 
-# --- Create tables on startup (public schema only) ---
+# --- Create tables on startup (public + ensure upgrade for all tenants) ---
 @app.on_event("startup")
 def on_startup():
-    # Base public schema – useful for default/demo tenant
+    """
+    Startup tasks:
+    - Ensure all Base tables exist in the public schema.
+    - Ensure the new prompt_pack_runs table exists in every tenant_* schema.
+    """
+    # 1) Public schema: create all tables
     Base.metadata.create_all(bind=engine)
+
+    # 2) For every existing tenant schema (tenant_%), ensure prompt_pack_runs exists
+    with engine.begin() as conn:
+        schemas = conn.execute(
+            text(
+                "SELECT schema_name FROM information_schema.schemata "
+                "WHERE schema_name LIKE 'tenant_%'"
+            )
+        ).scalars().all()
+
+        for schema in schemas:
+            # Route DDL into this schema
+            conn.execute(text(f'SET search_path TO "{schema}"'))
+            # Create only this table if missing
+            PromptPackRun.__table__.create(bind=conn, checkfirst=True)
 
 
 # --- Schemas (Pydantic models) ---
@@ -855,14 +875,14 @@ def run_llm_batch(
 
     # Store a single summary row for this batch run
     run_row = PromptPackRun(
-      product_id=product.id,
-      prompt_pack_id=db_pack.id,
-      pack_key=db_pack.pack_key,
-      pack_name=db_pack.name,
-      total_prompts=total,
-      appeared_count=appeared_count,
-      # stored as percentage 0–100
-      visibility_score=visibility_score * 100.0,
+        product_id=product.id,
+        prompt_pack_id=db_pack.id,
+        pack_key=db_pack.pack_key,
+        pack_name=db_pack.name,
+        total_prompts=total,
+        appeared_count=appeared_count,
+        # stored as percentage 0–100
+        visibility_score=visibility_score * 100.0,
     )
     db.add(run_row)
 
