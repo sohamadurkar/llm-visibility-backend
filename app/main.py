@@ -21,7 +21,6 @@ from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
 from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
-from app.models.llm_batch_run import LLMBatchRun  # ✅ NEW
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import run_llm_visibility_check
@@ -847,33 +846,16 @@ def run_llm_batch(
         )
         rows.append(row)
 
-    # Add all individual LLMTest rows (if any)
     if rows:
         db.add_all(rows)
+        db.commit()
 
     visibility_score = appeared_count / total if total > 0 else 0.0
-
-    # Decide model_used for the batch summary row
-    model_used_for_batch = payload.model or DEFAULT_LLM_MODEL
-
-    # ✅ NEW: store one summary row per batch run
-    batch_row = LLMBatchRun(
-        product_id=product.id,
-        pack_id=payload.pack_id,
-        model_used=model_used_for_batch,
-        total_prompts=total,
-        appeared_count=appeared_count,
-        visibility_score=visibility_score,
-    )
-    db.add(batch_row)
-
-    # Single commit for both detailed rows + batch summary
-    db.commit()
 
     return LLMRunBatchResult(
         product_id=product.id,
         pack_id=payload.pack_id,
-        model_used=model_used_for_batch,
+        model_used=payload.model,
         total_prompts=total,
         appeared_count=appeared_count,
         visibility_score=visibility_score,
