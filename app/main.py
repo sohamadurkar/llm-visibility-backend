@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
-from app.models.prompt_models import PromptPack, Prompt, PromptPackRun
+from app.models.prompt_models import PromptPack, Prompt, BatchRun
 from app.models.user_models import User
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
@@ -183,7 +183,7 @@ def _normalize_schema_name(raw: str) -> str:
       "demo_client"     -> "tenant_demo_client"
       "tenant_client_b" -> "tenant_client_b" (kept as is)
 
-    This is used for request-time routing via headers / token.
+    This is used for request-time routing via the X-Tenant header.
     """
     raw = (raw or "").strip().lower()
     if not raw:
@@ -233,35 +233,11 @@ def _ensure_tenant_schema(schema: str):
 
 def get_tenant_schema(request: Request) -> str:
     """
-    Determine tenant schema for this request.
-
-    Priority:
-    1. X-Tenant header (raw code or full 'tenant_xxx')
-    2. 'tenant' claim inside JWT access token
-    3. Fallback to 'public'
+    Read tenant from header and normalise to schema name.
+    If header missing, fall back to 'public'.
     """
-    # 1) Explicit header wins
     raw_tenant = request.headers.get(TENANT_HEADER)
-    if raw_tenant:
-        return _normalize_schema_name(raw_tenant)
-
-    # 2) Fallback: derive from JWT token, if present
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
-        try:
-            from jose import JWTError  # local import to avoid circular issues
-
-            payload = decode_access_token(token)
-            tenant_claim = payload.get("tenant")
-            if tenant_claim:
-                return _normalize_schema_name(tenant_claim)
-        except Exception:
-            # On any failure, we silently ignore and fall back to public
-            pass
-
-    # 3) Default
-    return "public"
+    return _normalize_schema_name(raw_tenant or "")
 
 
 # --- DB Session Dependency (now tenant-aware) ---
@@ -288,31 +264,11 @@ def get_db(request: Request):
         db.close()
 
 
-# --- Create tables on startup (public + ensure upgrade for all tenants) ---
+# --- Create tables on startup (public schema only) ---
 @app.on_event("startup")
 def on_startup():
-    """
-    Startup tasks:
-    - Ensure all Base tables exist in the public schema.
-    - Ensure the new prompt_pack_runs table exists in every tenant_* schema.
-    """
-    # 1) Public schema: create all tables
+    # Base public schema – useful for default/demo tenant
     Base.metadata.create_all(bind=engine)
-
-    # 2) For every existing tenant schema (tenant_%), ensure prompt_pack_runs exists
-    with engine.begin() as conn:
-        schemas = conn.execute(
-            text(
-                "SELECT schema_name FROM information_schema.schemata "
-                "WHERE schema_name LIKE 'tenant_%'"
-            )
-        ).scalars().all()
-
-        for schema in schemas:
-            # Route DDL into this schema
-            conn.execute(text(f'SET search_path TO "{schema}"'))
-            # Create only this table if missing
-            PromptPackRun.__table__.create(bind=conn, checkfirst=True)
 
 
 # --- Schemas (Pydantic models) ---
@@ -890,32 +846,34 @@ def run_llm_batch(
         )
         rows.append(row)
 
-    # Store all individual test rows
+    # Compute metrics
+    visibility_score = appeared_count / total if total > 0 else 0.0
+    visibility_score_percent = visibility_score * 100.0
+    model_used_for_batch = payload.model or DEFAULT_LLM_MODEL
+
     if rows:
+        # Store individual LLMTest rows
         db.add_all(rows)
 
-    # Compute visibility score (0–1)
-    visibility_score = appeared_count / total if total > 0 else 0.0
+        # Store aggregate batch metrics as a single row
+        batch_row = BatchRun(
+            product_id=product.id,
+            prompt_pack_id=db_pack.id,
+            prompt_pack_key=payload.pack_id,
+            prompt_pack_name=db_pack.name,
+            total_prompts=total,
+            appeared_count=appeared_count,
+            visibility_score_percent=visibility_score_percent,
+            model_used=model_used_for_batch,
+        )
+        db.add(batch_row)
 
-    # Store a single summary row for this batch run
-    run_row = PromptPackRun(
-        product_id=product.id,
-        prompt_pack_id=db_pack.id,
-        pack_key=db_pack.pack_key,
-        pack_name=db_pack.name,
-        total_prompts=total,
-        appeared_count=appeared_count,
-        # stored as percentage 0–100
-        visibility_score=visibility_score * 100.0,
-    )
-    db.add(run_row)
-
-    db.commit()
+        db.commit()
 
     return LLMRunBatchResult(
         product_id=product.id,
         pack_id=payload.pack_id,
-        model_used=payload.model,
+        model_used=model_used_for_batch,
         total_prompts=total,
         appeared_count=appeared_count,
         visibility_score=visibility_score,

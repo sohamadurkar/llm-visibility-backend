@@ -55,34 +55,36 @@ class Prompt(Base):
     tests = relationship("LLMTest", back_populates="prompt_obj")
 
 
-class PromptPackRun(Base):
+class BatchRun(Base):
     """
-    One row per batch LLM visibility run for a prompt pack.
+    Stores aggregate metrics for each LLM batch visibility run.
 
-    Stored per tenant (schema), with:
-    - metrics: total_prompts, appeared_count, visibility_score (percentage)
-    - pack info: pack_key (external ID), pack_name
-    - product_id + prompt_pack_id to link back to product/pack
+    One row is inserted per /run-llm-batch execution, per tenant.
     """
-    __tablename__ = "prompt_pack_runs"
+    __tablename__ = "batch_runs"
 
     id = Column(Integer, primary_key=True, index=True)
 
+    # Which product this batch run was for
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+
+    # Link to the DB prompt pack (numeric PK)
     prompt_pack_id = Column(Integer, ForeignKey("prompt_packs.id"), nullable=False)
 
-    # External / human-facing identifiers
-    pack_key = Column(String, nullable=False)   # e.g. "auto_1_velvet_mary_jane_20251203..."
-    pack_name = Column(String, nullable=True)
+    # Snapshot of the external pack identifier (same as PromptPack.pack_key / pack["id"])
+    prompt_pack_key = Column(String, nullable=False)
+
+    # Snapshot of the pack name at the time of the run
+    prompt_pack_name = Column(String, nullable=True)
 
     # Metrics
     total_prompts = Column(Integer, nullable=False)
     appeared_count = Column(Integer, nullable=False)
-    # Stored as percentage 0–100 (e.g. 34.0 = 34%)
-    visibility_score = Column(Float, nullable=False)
+
+    # Visibility score as a percentage (0–100)
+    visibility_score_percent = Column(Float, nullable=False)
+
+    # Model used for this batch run (e.g. "gpt-5.1")
+    model_used = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
-
-    prompt_pack = relationship("PromptPack")
-    # optional: product relationship if you want it:
-    # product = relationship("Product")
