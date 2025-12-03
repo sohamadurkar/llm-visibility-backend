@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
-from app.models.prompt_models import PromptPack, Prompt, PromptPackRun
+from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
@@ -846,27 +846,11 @@ def run_llm_batch(
         )
         rows.append(row)
 
-    # Store all individual test rows
     if rows:
         db.add_all(rows)
+        db.commit()
 
-    # Compute visibility score (0–1)
     visibility_score = appeared_count / total if total > 0 else 0.0
-
-    # Store a single summary row for this batch run
-    run_row = PromptPackRun(
-      product_id=product.id,
-      prompt_pack_id=db_pack.id,
-      pack_key=db_pack.pack_key,
-      pack_name=db_pack.name,
-      total_prompts=total,
-      appeared_count=appeared_count,
-      # stored as percentage 0–100
-      visibility_score=visibility_score * 100.0,
-    )
-    db.add(run_row)
-
-    db.commit()
 
     return LLMRunBatchResult(
         product_id=product.id,

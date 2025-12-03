@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -53,36 +53,3 @@ class Prompt(Base):
 
     pack = relationship("PromptPack", back_populates="prompts")
     tests = relationship("LLMTest", back_populates="prompt_obj")
-
-
-class PromptPackRun(Base):
-    """
-    One row per batch LLM visibility run for a prompt pack.
-
-    Stored per tenant (schema), with:
-    - metrics: total_prompts, appeared_count, visibility_score (percentage)
-    - pack info: pack_key (external ID), pack_name
-    - product_id + prompt_pack_id to link back to product/pack
-    """
-    __tablename__ = "prompt_pack_runs"
-
-    id = Column(Integer, primary_key=True, index=True)
-
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
-    prompt_pack_id = Column(Integer, ForeignKey("prompt_packs.id"), nullable=False)
-
-    # External / human-facing identifiers
-    pack_key = Column(String, nullable=False)   # e.g. "auto_1_velvet_mary_jane_20251203..."
-    pack_name = Column(String, nullable=True)
-
-    # Metrics
-    total_prompts = Column(Integer, nullable=False)
-    appeared_count = Column(Integer, nullable=False)
-    # Stored as percentage 0–100 (e.g. 34.0 = 34%)
-    visibility_score = Column(Float, nullable=False)
-
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    prompt_pack = relationship("PromptPack")
-    # optional: product relationship if you want it:
-    # product = relationship("Product")
