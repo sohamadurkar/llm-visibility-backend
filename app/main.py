@@ -23,7 +23,10 @@ from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
-from app.services.llm_checker import run_llm_visibility_check
+from app.services.llm_checker import (
+    run_llm_visibility_check,
+    run_llm_visibility_batch_check,  # NEW
+)
 from app.services.prompt_generator import (
     generate_prompt_pack_for_product,
     save_prompt_pack_to_file,
@@ -810,13 +813,9 @@ def run_llm_batch(
         p.index: p for p in db.query(Prompt).filter(Prompt.pack_id == db_pack.id).all()
     }
 
-    appeared_count = 0
-    rows: List[LLMTest] = []
-
+    # Ensure we have Prompt rows for each index
     for idx, prompt_text in enumerate(prompts_list):
-        # Ensure Prompt row exists
-        prompt_row = existing_prompts.get(idx)
-        if not prompt_row:
+        if idx not in existing_prompts:
             prompt_row = Prompt(
                 pack_id=db_pack.id,
                 index=idx,
@@ -826,23 +825,49 @@ def run_llm_batch(
             db.flush()
             existing_prompts[idx] = prompt_row
 
-        result = run_llm_visibility_check(
-            prompt=prompt_text,
+    # --- NEW: Single LLM batch call for all prompts ---
+    try:
+        batch_results = run_llm_visibility_batch_check(
+            prompts=prompts_list,
             domain=domain,
             model=payload.model,
         )
-        if result["appeared"]:
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running LLM batch: {e}")
+    # --------------------------------------------------
+
+    appeared_count = 0
+    rows: List[LLMTest] = []
+
+    # batch_results[i] corresponds to prompts_list[i] (best-effort)
+    for idx, prompt_text in enumerate(prompts_list):
+        if idx < len(batch_results):
+            res = batch_results[idx]
+            appeared = res.get("appeared", False)
+            matched = res.get("matched") or None
+            snippet = res.get("snippet") or ""
+            model_used = res.get("model") or payload.model
+        else:
+            # Fallback if model omitted some indexes
+            appeared = False
+            matched = None
+            snippet = ""
+            model_used = payload.model
+
+        if appeared:
             appeared_count += 1
+
+        prompt_row = existing_prompts[idx]
 
         row = LLMTest(
             product_id=product.id,
             pack_id=db_pack.id,
             prompt_id=prompt_row.id,
-            model_used=result["model"],
+            model_used=model_used,
             prompt=prompt_text,
-            appeared=result["appeared"],
-            matched_domain=result["matched"] or None,
-            snippet=result["snippet"],
+            appeared=appeared,
+            matched_domain=matched,
+            snippet=snippet,
         )
         rows.append(row)
 
