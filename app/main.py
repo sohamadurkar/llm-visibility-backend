@@ -718,29 +718,66 @@ async def analyze_website(
         if h1 and h1.get_text():
             page_title = h1.get_text().strip()
 
-    # Detect Product JSON-LD
-    has_product_jsonld = False
+    # Detect relevant JSON-LD (Product, Service, Offer, etc.)
+    RELEVANT_SCHEMA_TYPES = {
+        "Product",
+        "Service",
+        "Offer",
+        "AggregateOffer",
+        "Review",
+        "AggregateRating",
+        "Organization",
+        "LocalBusiness",
+        "Place",
+        "Article",
+        "BlogPosting",
+        "WebPage",
+        "FAQPage",
+        "HowTo",
+        "ItemList",
+        "Event",
+        "Course",
+        "SoftwareApplication",
+    }
+
+    def contains_relevant_schema(d: Any) -> bool:
+        """
+        Recursively check if the JSON-LD structure contains any of the
+        relevant schema.org types (Product, Service, Offer, etc.).
+        """
+        if isinstance(d, dict):
+            t = d.get("@type")
+            if isinstance(t, str):
+                if t in RELEVANT_SCHEMA_TYPES:
+                    return True
+            elif isinstance(t, list):
+                if any(isinstance(x, str) and x in RELEVANT_SCHEMA_TYPES for x in t):
+                    return True
+
+            # Look into common nested containers
+            for key in (
+                "@graph",
+                "itemListElement",
+                "mainEntity",
+                "about",
+                "hasOfferCatalog",
+            ):
+                if key in d and contains_relevant_schema(d[key]):
+                    return True
+
+        elif isinstance(d, list):
+            return any(contains_relevant_schema(x) for x in d)
+
+        return False
+
+    has_product_jsonld = False  # name kept for DB compatibility
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(tag.string or "")
         except Exception:
             continue
 
-        def contains_product(d: Any) -> bool:
-            if isinstance(d, dict):
-                t = d.get("@type")
-                if t == "Product":
-                    return True
-                if isinstance(t, list) and "Product" in t:
-                    return True
-                for k in ("@graph", "itemListElement", "mainEntity"):
-                    if k in d and contains_product(d[k]):
-                        return True
-            elif isinstance(d, list):
-                return any(contains_product(x) for x in d)
-            return False
-
-        if contains_product(data):
+        if contains_relevant_schema(data):
             has_product_jsonld = True
             break
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -23,7 +23,10 @@ from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
-from app.services.llm_checker import run_llm_visibility_check
+from app.services.llm_checker import (
+    run_llm_visibility_check,
+    run_llm_visibility_batch_check,
+)
 from app.services.prompt_generator import (
     generate_prompt_pack_for_product,
     save_prompt_pack_to_file,
@@ -333,6 +336,10 @@ class LLMRunBatchResult(BaseModel):
     visibility_score: float
 
 
+class LLMRunBatchStartResponse(BaseModel):
+    status: str = "started"
+
+
 class GeneratePromptPackRequest(BaseModel):
     product_id: int
     num_prompts: int = 50
@@ -456,6 +463,112 @@ def get_current_user(
         raise HTTPException(status_code=403, detail="User is inactive")
 
     return user
+
+
+# --- Background batch helper ---
+
+def _run_llm_batch_background(
+    tenant_schema: str,
+    product_id: int,
+    pack_id: str,
+    model: Optional[str],
+):
+    """
+    Background task: runs the full LLM batch for a given tenant/product/pack
+    without blocking the original HTTP request.
+    """
+    db = SessionLocal()
+    try:
+        # Ensure we are operating inside the correct tenant schema
+        db.execute(text(f'SET search_path TO "{tenant_schema}"'))
+
+        product = (
+            db.query(Product)
+            .filter(Product.id == product_id)
+            .one_or_none()
+        )
+        if not product:
+            return
+
+        parsed = urlparse(product.url)
+        domain = parsed.netloc
+        if not domain:
+            return
+
+        try:
+            pack_data = load_prompt_pack(pack_id)
+        except FileNotFoundError:
+            return
+
+        prompts_list = pack_data.get("prompts", [])
+        if not prompts_list:
+            return
+
+        # Ensure PromptPack exists in DB
+        db_pack = (
+            db.query(PromptPack)
+            .filter(PromptPack.pack_key == pack_id)
+            .one_or_none()
+        )
+        if not db_pack:
+            db_pack = PromptPack(
+                pack_key=pack_id,
+                name=pack_data.get("name"),
+                category=pack_data.get("category"),
+                source=pack_data.get("source") or "unknown",
+                language=pack_data.get("language", "en"),
+                product_id=product.id,
+            )
+            db.add(db_pack)
+            db.flush()
+
+        # Ensure Prompt rows for each index
+        existing_prompts = {
+            p.index: p
+            for p in db.query(Prompt).filter(Prompt.pack_id == db_pack.id).all()
+        }
+
+        for idx, prompt_text in enumerate(prompts_list):
+            if idx not in existing_prompts:
+                prompt_row = Prompt(
+                    pack_id=db_pack.id,
+                    index=idx,
+                    text=prompt_text,
+                )
+                db.add(prompt_row)
+                db.flush()
+                existing_prompts[idx] = prompt_row
+
+        # Run batch LLM check
+        batch_results = run_llm_visibility_batch_check(
+            prompts=prompts_list,
+            domain=domain,
+            model=model,
+        )
+
+        rows: List[LLMTest] = []
+        for idx, prompt_text in enumerate(prompts_list):
+            res = batch_results[idx]
+            prompt_row = existing_prompts[idx]
+
+            row = LLMTest(
+                product_id=product.id,
+                pack_id=db_pack.id,
+                prompt_id=prompt_row.id,
+                model_used=res["model"],
+                prompt=prompt_text,
+                appeared=res["appeared"],
+                matched_domain=res["matched"] or None,
+                snippet=res["snippet"],
+            )
+            rows.append(row)
+
+        if rows:
+            db.add_all(rows)
+            db.commit()
+
+    finally:
+        db.close()
 
 
 # --- Endpoints ---
@@ -713,9 +826,11 @@ def run_llm_check(
         domain=domain,
         model=payload.model,
     )
+    
+    product_id = payload.product_id
 
     row = LLMTest(
-        product_id=product.id,
+        product_id=product_id,
         model_used=result["model"],
         prompt=payload.prompt,
         appeared=result["appeared"],
@@ -726,7 +841,7 @@ def run_llm_check(
     db.commit()
 
     return LLMCheckResult(
-        product_id=product.id,
+        product_id=product_id,
         model_used=result["model"],
         appeared=result["appeared"],
         matched_domain_or_url=result["matched"] or None,
@@ -766,6 +881,10 @@ def run_llm_batch(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """
+    Synchronous version of batch run. For large packs, prefer /run-llm-batch-async
+    from the frontend to avoid browser timeouts.
+    """
     product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
@@ -810,13 +929,9 @@ def run_llm_batch(
         p.index: p for p in db.query(Prompt).filter(Prompt.pack_id == db_pack.id).all()
     }
 
-    appeared_count = 0
-    rows: List[LLMTest] = []
-
+    # Ensure Prompt row exists for each index
     for idx, prompt_text in enumerate(prompts_list):
-        # Ensure Prompt row exists
-        prompt_row = existing_prompts.get(idx)
-        if not prompt_row:
+        if idx not in existing_prompts:
             prompt_row = Prompt(
                 pack_id=db_pack.id,
                 index=idx,
@@ -826,23 +941,36 @@ def run_llm_batch(
             db.flush()
             existing_prompts[idx] = prompt_row
 
-        result = run_llm_visibility_check(
-            prompt=prompt_text,
+    # Batch LLM call
+    try:
+        batch_results = run_llm_visibility_batch_check(
+            prompts=prompts_list,
             domain=domain,
             model=payload.model,
         )
-        if result["appeared"]:
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running LLM batch: {e}")
+
+    appeared_count = 0
+    rows: List[LLMTest] = []
+
+    # batch_results[i] corresponds to prompts_list[i]
+    for idx, prompt_text in enumerate(prompts_list):
+        res = batch_results[idx]
+        if res["appeared"]:
             appeared_count += 1
+
+        prompt_row = existing_prompts[idx]
 
         row = LLMTest(
             product_id=product.id,
             pack_id=db_pack.id,
             prompt_id=prompt_row.id,
-            model_used=result["model"],
+            model_used=res["model"],
             prompt=prompt_text,
-            appeared=result["appeared"],
-            matched_domain=result["matched"] or None,
-            snippet=result["snippet"],
+            appeared=res["appeared"],
+            matched_domain=res["matched"] or None,
+            snippet=res["snippet"],
         )
         rows.append(row)
 
@@ -860,6 +988,47 @@ def run_llm_batch(
         appeared_count=appeared_count,
         visibility_score=visibility_score,
     )
+
+
+@app.post("/run-llm-batch-async", response_model=LLMRunBatchStartResponse)
+def run_llm_batch_async(
+    payload: LLMRunBatchRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Fire-and-forget variant: starts the batch run in the background and
+    returns immediately. Frontend should poll /prompt-stats/{pack_id}
+    to see results instead of waiting for this endpoint to finish work.
+    """
+    product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    try:
+        pack_data = load_prompt_pack(payload.pack_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    prompts_list = pack_data.get("prompts", [])
+    if not prompts_list:
+        raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
+
+    # Determine the tenant schema for this request
+    tenant_schema = get_tenant_schema(request)
+
+    # Schedule background job
+    background_tasks.add_task(
+        _run_llm_batch_background,
+        tenant_schema=tenant_schema,
+        product_id=payload.product_id,
+        pack_id=payload.pack_id,
+        model=payload.model,
+    )
+
+    return LLMRunBatchStartResponse(status="started")
 
 
 @app.post("/generate-prompt-pack", response_model=GeneratePromptPackResponse)
@@ -1095,7 +1264,6 @@ async def visibility_report(
         file_path=file_path,
         download_url=download_url,
     )
-
 
 @app.get("/download/prompt-pack/{pack_id}")
 def download_prompt_pack(

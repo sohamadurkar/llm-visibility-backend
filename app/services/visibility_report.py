@@ -47,7 +47,7 @@ def build_page_snapshot(html: str, max_body_chars: int = 2000, max_schema_chars:
     - meta description
     - headings
     - main text sample
-    - product JSON-LD snippet (if present)
+    - product/Service/Offer JSON-LD snippet (if present)
     """
     soup = BeautifulSoup(html, "lxml")
 
@@ -89,7 +89,47 @@ def build_page_snapshot(html: str, max_body_chars: int = 2000, max_schema_chars:
     if len(main_text) > max_body_chars:
         main_text = main_text[:max_body_chars]
 
-    # Product JSON-LD snippet
+    # Structured data (Product/Service/etc.) JSON-LD snippet
+    RELEVANT_SCHEMA_TYPES = {
+        "Product",
+        "Service",
+        "Offer",
+        "AggregateOffer",
+        "Review",
+        "AggregateRating",
+        "Organization",
+        "LocalBusiness",
+        "Place",
+        "Article",
+        "BlogPosting",
+        "WebPage",
+        "FAQPage",
+        "HowTo",
+        "ItemList",
+        "Event",
+        "Course",
+        "SoftwareApplication",
+    }
+
+    def contains_relevant_schema(d):
+        if isinstance(d, dict):
+            t = d.get("@type")
+            if isinstance(t, str):
+                if t in RELEVANT_SCHEMA_TYPES:
+                    return True
+            elif isinstance(t, list):
+                if any(isinstance(x, str) and x in RELEVANT_SCHEMA_TYPES for x in t):
+                    return True
+
+            for key in ("@graph", "itemListElement", "mainEntity", "about", "hasOfferCatalog"):
+                if key in d and contains_relevant_schema(d[key]):
+                    return True
+
+        elif isinstance(d, list):
+            return any(contains_relevant_schema(x) for x in d)
+
+        return False
+
     product_jsonld_snippet = None
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
@@ -97,21 +137,7 @@ def build_page_snapshot(html: str, max_body_chars: int = 2000, max_schema_chars:
         except Exception:
             continue
 
-        def contains_product(d):
-            if isinstance(d, dict):
-                t = d.get("@type")
-                if t == "Product":
-                    return True
-                if isinstance(t, list) and "Product" in t:
-                    return True
-                for k in ("@graph", "itemListElement", "mainEntity"):
-                    if k in d and contains_product(d[k]):
-                        return True
-            elif isinstance(d, list):
-                return any(contains_product(x) for x in d)
-            return False
-
-        if contains_product(data):
+        if contains_relevant_schema(data):
             raw = json.dumps(data, ensure_ascii=False, indent=2)
             product_jsonld_snippet = raw[:max_schema_chars]
             break
