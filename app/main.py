@@ -1198,36 +1198,7 @@ async def visibility_report(
     parsed = urlparse(product.url)
     domain = parsed.netloc
 
-    # 1) Find the MOST RECENT pack-based test for this product
-    latest_pack_test = (
-        db.query(LLMTest)
-        .filter(
-            LLMTest.product_id == product.id,
-            LLMTest.pack_id.isnot(None),  # only batch runs
-        )
-        .order_by(LLMTest.id.desc())
-        .first()
-    )
-
-    chosen_pack_id = None
-    scope = "global"
-
-    if latest_pack_test and latest_pack_test.pack_id is not None:
-        # We have at least one batch run; use ONLY tests from this latest pack
-        chosen_pack_id = latest_pack_test.pack_id
-        scope = "latest_pack"
-
-        tests = (
-            db.query(LLMTest)
-            .filter(
-                LLMTest.product_id == product.id,
-                LLMTest.pack_id == chosen_pack_id,
-            )
-            .all()
-        )
-    else:
-        # Fallback: no pack-based tests yet, use ALL tests (old global behaviour)
-        tests = db.query(LLMTest).filter(LLMTest.product_id == product.id).all()
+    tests = db.query(LLMTest).filter(LLMTest.product_id == product.id).all()
 
     total_tests = len(tests)
     appeared_count = sum(1 for t in tests if t.appeared)
@@ -1245,9 +1216,6 @@ async def visibility_report(
     visibility_metrics = {
         "product_id": product.id,
         "url": product.url,
-        "scope": scope,  # "latest_pack" or "global"
-        # pack_id only relevant when scope == "latest_pack"
-        "pack_id": chosen_pack_id,
         "total_tests": total_tests,
         "appeared_count": appeared_count,
         "overall_visibility_score": overall_visibility,
@@ -1255,15 +1223,12 @@ async def visibility_report(
             model: {
                 "total": data["total"],
                 "appeared": data["appeared"],
-                "visibility_score": (data["appeared"] / data["total"])
-                if data["total"] > 0
-                else 0.0,
+                "visibility_score": (data["appeared"] / data["total"]) if data["total"] > 0 else 0.0,
             }
             for model, data in per_model.items()
         },
     }
 
-    # 2) Fetch page HTML
     try:
         html = await fetch_page_html_via_scraperapi(product.url)
     except Exception as e:
@@ -1271,7 +1236,6 @@ async def visibility_report(
 
     snapshot = build_page_snapshot(html)
 
-    # 3) Generate markdown report via LLM
     try:
         report_md = generate_visibility_report_markdown(
             product_title=product.title or product.url,
@@ -1285,7 +1249,6 @@ async def visibility_report(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating report: {e}")
 
-    # 4) Save to file and build download URL
     try:
         file_path = save_report_markdown_to_file(product.id, report_md)
         base_url = str(request.base_url).rstrip("/")
