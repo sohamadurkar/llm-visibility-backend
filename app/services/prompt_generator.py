@@ -25,81 +25,121 @@ def _generate_prompts_with_llm(
     num_prompts: int = 50,
 ) -> List[str]:
     """
-    Uses OpenAI to generate a list of high-intent shopping prompts for a product/category.
+    Uses OpenAI to generate a list of high-intent, CUSTOMER-LIKE shopping prompts
+    for a product/category.
+
+    Core principles (enforced via the system + user prompt):
+    - Prompts must sound like REAL buyers talking to an assistant.
+    - No storylines / themes / references / “that famous X” type language.
+    - No brand / store / domain names, and no reuse of product_title text.
     """
     _ensure_api_key()
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     system_msg = (
-        "You are an expert e-commerce growth marketer and search strategist. "
-        "You design natural-language shopping queries that REAL users would ask an AI assistant "
-        "when they are actively looking to BUY a product, not just research it."
+        "You are an expert in real-world e-commerce search behaviour. "
+        "You generate short, natural-language BUYING QUERIES that real shoppers would ask an AI assistant. "
+        "You NEVER write marketing copy, lore, story references, or themed descriptions. "
+        "You ONLY write what a buyer would actually type or say when trying to find products to purchase."
     )
 
     user_msg = f"""
 You must generate {num_prompts} DIVERSE, HIGH-INTENT shopping prompts for products like:
 
-- Product title: {product_title}
-- Product page URL: {product_url}
-- Product/category: {category or "unknown"}
+- Internal product title (for your understanding only): {product_title}
+- Product page URL (for context only): {product_url}
+- Product/category (for context only): {category or "unknown"}
 
-Very important behavioural rules:
+The user does NOT know the internal title, brand, or URL. They are just a normal shopper.
 
-1) ALL prompts must reflect a user who is READY TO BUY or very close to making a purchase.
-   - Use verbs and patterns like "buy", "where can I find", "best X to buy", "options under £X",
-     "recommend", "show me", "which X should I buy", etc.
-   - The user is NOT asking for definitions or generic information; they want product suggestions and links.
+========================
+ABSOLUTE BEHAVIOURAL RULES
+========================
 
-2) You MUST cover the following high-intent behaviour types across the whole set
-   (not necessarily labelled, but reflected in the prompts):
+1) REAL BUYER INTENT ONLY (not research)
+   - Every prompt must reflect a shopper who is READY TO BUY or very close:
+     - Use patterns like: "buy", "where can I find", "best X to buy", "which X should I get",
+       "options under £X", "recommend", "show me", "good value", "with fast delivery", etc.
+   - No purely informational or educational questions.
+   - The user is clearly expecting concrete product suggestions they could actually purchase.
+
+2) PROMPT STYLE = HOW HUMANS SEARCH
+   - Each prompt must be:
+     - 1 sentence (max 2 if absolutely needed),
+     - Short and to the point (roughly 8–25 words),
+     - Written in simple, natural language.
+   - Do NOT explain backstory, meaning, inspiration, themes, or lore.
+   - Do NOT reference any “famous”, “iconic”, or “classic” songs, movies, memes, stories, art, characters, or rivalries.
+   - Do NOT say things like “that famous X”, “that iconic Y”, “that classic duet”, “that viral meme”, etc.
+   - Do NOT describe what is printed on the product in a narrative way.
+   - The product_title and URL are ONLY for you to infer generic product type, features, use-cases, etc.
+     You MUST NOT reuse phrases, names, or references from them.
+
+3) COVER KEY BUYER MODES ACROSS THE WHOLE SET
+   Spread the prompts so that, across the list, you naturally cover:
 
    (a) Product discovery (buy mode)
-       - User knows the general type of item and wants suggestions to buy.
-       - e.g. "best velvet Mary Jane pumps for women under £200 available online"
+       - User knows the general type and wants options.
+       - e.g. "best {category or "product"} to buy for everyday use"
 
-   (b) Specific product / close-alternative search
-       - User is looking for this product or very similar ones to buy.
-       - e.g. "velvet Mary Jane pumps similar to {product_title} available in the UK"
+   (b) Close-alternative search
+       - User wants similar items (style, use-case, features) without knowing specific brands.
+       - e.g. "similar {category or "items"} with [feature/fit/colour] I can buy online"
 
-   (c) Price- / budget-sensitive purchasing
-       - User is deciding what to buy based on price or deals.
-       - e.g. "velvet Mary Jane shoes under £150 with good quality"
+   (c) Price / budget-led buying
+       - User filters by budget or value.
+       - e.g. "{category or "product"} under £50 with good reviews"
 
    (d) Occasion / use-case driven buying
-       - User wants a product for a specific event or scenario.
-       - e.g. "velvet pumps suitable for winter weddings" or "heels for cocktail parties"
+       - User has a specific event or scenario.
+       - e.g. "{category or "product"} suitable for weddings / office / travel / gifts"
 
-   (e) Fit / comfort / practicality based buying
-       - User wants to buy but cares about comfort, heel height, walkability, etc.
-       - e.g. "comfortable velvet pumps with low heel for long events"
+   (e) Fit / comfort / practicality
+       - Comfort, fit, material, durability, practicality.
+       - e.g. "comfortable {category or "product"} for all-day wear"
 
-   (f) Trend / popularity driven buying
-       - User wants to buy something that is trending or popular right now.
-       - e.g. "trending velvet Mary Jane pumps this season"
+   (f) Trend / popularity / best-rated
+       - User wants trending or best-rated options.
+       - e.g. "most popular {category or "product"} this season"
 
-   (g) Brand / store preference
-       - User is ready to buy but prefers certain brands or stores (like John Lewis, Penelope Chilvers, etc.).
-       - e.g. "velvet Mary Jane pumps available at John Lewis"
+   (g) Channel preference
+       - User may mention generic marketplaces (e.g. "online", "high street", "UK retailers").
+       - Do NOT mention any specific retailer or marketplace by name.
+       - Keep it generic like "online shops", "UK websites", "high street stores", etc.
 
-3) DO NOT generate:
-   - informational-only queries (e.g. "are velvet shoes in style?")
-   - purely educational questions (e.g. "what are Mary Jane shoes?")
-   - generic fashion advice not clearly linked to finding a product to buy.
+4) STRICT BRAND, STORE, DOMAIN & TITLE NEUTRALITY
+   - NEVER mention:
+     - The product's brand,
+     - The product's store name,
+     - The website/domain or any URL,
+     - Any proper noun derived from the product_title or URL.
+   - NEVER paraphrase or echo the product title.
+   - Assume the shopper has NEVER heard of this specific product/brand.
 
-4) BRAND & DOMAIN NEUTRALITY (mandatory):
-   - Do NOT mention the product's brand.
-   - Do NOT mention the store name from the product title.
-   - Do NOT include or paraphrase the product title directly.
-   - Do NOT mention the website/domain.
-   - Prompts must be written as if the shopper does NOT know the brand yet.
+5) WHAT TO AVOID (VERY IMPORTANT)
+   DO NOT generate:
+   - Lore / story / rivalry / character / plot references of any kind.
+   - Lyrics, quotes, or indirect references to songs, shows, movies, or memes.
+   - Fan language ("obsessed with", "stan", etc.) that encodes the identity of the item.
+   - “Collector” or “fan tribute” style prompts that sneak in identity clues.
+   - Long, descriptive, themed or poetic language.
 
-5) Tone & form:
-   - Each prompt must be a standalone user query, in natural language.
-   - Assume the user is talking to an AI assistant (like ChatGPT) to discover products and buy them.
-   - Use UK context when relevant (currency £, retailers in the UK), unless the category suggests otherwise.
+   Examples of BAD patterns you MUST NOT use:
+   - "that famous [song/duet/book/movie] where ..."
+   - "two characters arguing about ..."
+   - "that iconic scene where ..."
+   - "T-shirt with artwork of [named or clearly implied story/duet/etc.]"
 
-6) Output format:
+   Instead, stay GENERIC and PRODUCT-CENTRIC:
+   - Talk about type, fit, material, price, colour, style, use-case, size, delivery, quality, etc.
+
+6) UK CONTEXT
+   - Use £ for prices.
+   - Assume the shopper is in the UK, unless the category clearly implies a different region.
+   - Retail channel wording can be like "online in the UK", "UK websites", "UK shops".
+
+7) OUTPUT FORMAT (MUST FOLLOW EXACTLY)
    - Return STRICTLY valid JSON with this exact structure:
 
    {{
@@ -111,7 +151,7 @@ Very important behavioural rules:
    }}
 
    - No markdown, no explanations, no comments, no extra keys.
-   - Exactly {num_prompts} prompts if possible; a minimum of 30 if you cannot reach {num_prompts}.
+   - Return exactly {num_prompts} prompts if possible, but at least 30 minimum.
 """
 
     completion = client.chat.completions.create(
@@ -120,7 +160,7 @@ Very important behavioural rules:
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
         ],
-        temperature=0.5,
+        temperature=0.4,
     )
 
     content = completion.choices[0].message.content or ""
@@ -166,13 +206,22 @@ def generate_prompt_pack_for_product(
 ) -> Dict[str, Any]:
     """
     Returns a dict in the same structure as your JSON prompt pack files.
-    Prompts are generated with explicit high-purchase-intent logic.
+    Prompts are generated with explicit high-purchase-intent logic and are:
+
+    - Short, natural buyer queries.
+    - Brand / store / domain / title neutral.
+    - Free of storylines, references, or theme-based descriptions.
 
     IMPORTANT:
     - If pack_id is not provided, we generate a UNIQUE pack ID each time
       using product_id + slug + timestamp.
     """
-    prompts = _generate_prompts_with_llm(product_title, product_url, category, num_prompts)
+    prompts = _generate_prompts_with_llm(
+        product_title=product_title,
+        product_url=product_url,
+        category=category,
+        num_prompts=num_prompts,
+    )
 
     if pack_id:
         base_id = pack_id
