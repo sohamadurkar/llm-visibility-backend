@@ -826,9 +826,11 @@ def run_llm_check(
         domain=domain,
         model=payload.model,
     )
+    
+    product_id = payload.product_id
 
     row = LLMTest(
-        product_id=product.id,
+        product_id=product_id,
         model_used=result["model"],
         prompt=payload.prompt,
         appeared=result["appeared"],
@@ -839,7 +841,7 @@ def run_llm_check(
     db.commit()
 
     return LLMCheckResult(
-        product_id=product.id,
+        product_id=product_id,
         model_used=result["model"],
         appeared=result["appeared"],
         matched_domain_or_url=result["matched"] or None,
