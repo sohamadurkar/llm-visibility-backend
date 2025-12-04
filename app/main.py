@@ -376,6 +376,8 @@ class GenerateGooglePromptPackResponse(BaseModel):
 class VisibilityReportRequest(BaseModel):
     product_id: int
     model: Optional[str] = DEFAULT_REPORT_MODEL
+    pack_id: Optional[str] = None    # NEW
+    batch_id: Optional[str] = None   # NEW
 
 
 class VisibilityReportResponse(BaseModel):
@@ -1249,7 +1251,25 @@ async def visibility_report(
     parsed = urlparse(product.url)
     domain = parsed.netloc
 
-    tests = db.query(LLMTest).filter(LLMTest.product_id == product.id).all()
+    # Build base query for tests
+    tests_query = db.query(LLMTest).filter(LLMTest.product_id == product.id)
+
+    # Optional: restrict to a specific pack (pack_key)
+    if payload.pack_id:
+        db_pack = (
+            db.query(PromptPack)
+            .filter(PromptPack.pack_key == payload.pack_id)
+            .one_or_none()
+        )
+        if not db_pack:
+            raise HTTPException(status_code=404, detail="Prompt pack not found for report")
+        tests_query = tests_query.filter(LLMTest.pack_id == db_pack.id)
+
+    # Optional: restrict to a specific batch
+    if payload.batch_id:
+        tests_query = tests_query.filter(LLMTest.batch_id == payload.batch_id)
+
+    tests = tests_query.all()
 
     total_tests = len(tests)
     appeared_count = sum(1 for t in tests if t.appeared)
@@ -1270,6 +1290,8 @@ async def visibility_report(
         "total_tests": total_tests,
         "appeared_count": appeared_count,
         "overall_visibility_score": overall_visibility,
+        "pack_id": payload.pack_id,
+        "batch_id": payload.batch_id,
         "per_model": {
             model: {
                 "total": data["total"],
