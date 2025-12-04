@@ -87,12 +87,19 @@ Very important behavioural rules:
    - purely educational questions (e.g. "what are Mary Jane shoes?")
    - generic fashion advice not clearly linked to finding a product to buy.
 
-4) Tone & form:
+4) BRAND & DOMAIN NEUTRALITY (mandatory):
+   - Do NOT mention the product's brand.
+   - Do NOT mention the store name from the product title.
+   - Do NOT include or paraphrase the product title directly.
+   - Do NOT mention the website/domain.
+   - Prompts must be written as if the shopper does NOT know the brand yet.
+
+5) Tone & form:
    - Each prompt must be a standalone user query, in natural language.
    - Assume the user is talking to an AI assistant (like ChatGPT) to discover products and buy them.
    - Use UK context when relevant (currency £, retailers in the UK), unless the category suggests otherwise.
 
-5) Output format:
+6) Output format:
    - Return STRICTLY valid JSON with this exact structure:
 
    {{

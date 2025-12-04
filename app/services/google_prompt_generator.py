@@ -44,7 +44,7 @@ def _generate_prompts_from_google_queries(
 ) -> List[str]:
     """
     Uses OpenAI to turn Google-based signals (PAA, Related Searches,
-    Titles & Snippets) into high-intent shopping prompts.
+    Titles & Snippets) into high-intent, brand-neutral shopping prompts.
     """
     _ensure_api_key()
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -56,7 +56,9 @@ def _generate_prompts_from_google_queries(
         "You are an expert e-commerce growth marketer and search strategist. "
         "You specialise in transforming real Google search behaviour into "
         "high-intent shopping prompts that a user would ask an AI assistant when "
-        "they are actively looking to BUY a product, not just research it."
+        "they are actively looking to BUY a product, not just research it. "
+        "All prompts you produce must be brand-neutral and must NOT include specific "
+        "brand names or website domains."
     )
 
     signals_json = json.dumps(google_signals, ensure_ascii=False, indent=2)
@@ -99,14 +101,23 @@ Your tasks:
         • occasion / use-case driven buying
         • fit / comfort / practicality before buying
         • trend / popularity driven buying
-        • brand / store preference
+        • retailer / channel preference (e.g. UK department stores, online shops)
    - Use UK context where appropriate (e.g. currency £, UK retailers).
 
-3) Generate up to {num_prompts} prompts.
+3) Brand & domain neutrality (VERY IMPORTANT):
+   - The user does NOT know the specific brand or website of this product yet.
+   - Do NOT copy or paraphrase the product title.
+   - Do NOT mention the website domain or URL in any prompt.
+   - If the Google signals contain brand names, store names, or domains,
+     you must REMOVE them and replace them with generic phrases such as
+     "reputable brands", "UK department stores", or "online retailers".
+   - The final prompts must NOT contain any explicit brand names or web domains.
+
+4) Generate up to {num_prompts} prompts.
    - They must ALL be high purchase intent.
    - They must ALL sound like real user queries.
 
-4) Output:
+5) Output:
    Return STRICTLY valid JSON in this exact format:
 
    {{
