@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import os
 import json
 import re
+import uuid  # NEW
 
 import httpx
 from bs4 import BeautifulSoup
@@ -334,10 +335,12 @@ class LLMRunBatchResult(BaseModel):
     total_prompts: int
     appeared_count: int
     visibility_score: float
+    batch_id: str  # NEW
 
 
 class LLMRunBatchStartResponse(BaseModel):
     status: str = "started"
+    batch_id: str  # NEW
 
 
 class GeneratePromptPackRequest(BaseModel):
@@ -373,6 +376,8 @@ class GenerateGooglePromptPackResponse(BaseModel):
 class VisibilityReportRequest(BaseModel):
     product_id: int
     model: Optional[str] = DEFAULT_REPORT_MODEL
+    pack_id: Optional[str] = None    # NEW
+    batch_id: Optional[str] = None   # NEW
 
 
 class VisibilityReportResponse(BaseModel):
@@ -472,6 +477,7 @@ def _run_llm_batch_background(
     product_id: int,
     pack_id: str,
     model: Optional[str],
+    batch_id: str,  # NEW
 ):
     """
     Background task: runs the full LLM batch for a given tenant/product/pack
@@ -552,6 +558,7 @@ def _run_llm_batch_background(
             prompt_row = existing_prompts[idx]
 
             row = LLMTest(
+                batch_id=batch_id,  # NEW
                 product_id=product.id,
                 pack_id=db_pack.id,
                 prompt_id=prompt_row.id,
@@ -978,6 +985,9 @@ def run_llm_batch(
             db.flush()
             existing_prompts[idx] = prompt_row
 
+    # NEW: create a batch_id for this run
+    batch_id = uuid.uuid4().hex
+
     # Batch LLM call
     try:
         batch_results = run_llm_visibility_batch_check(
@@ -1000,6 +1010,7 @@ def run_llm_batch(
         prompt_row = existing_prompts[idx]
 
         row = LLMTest(
+            batch_id=batch_id,  # NEW
             product_id=product.id,
             pack_id=db_pack.id,
             prompt_id=prompt_row.id,
@@ -1024,6 +1035,7 @@ def run_llm_batch(
         total_prompts=total,
         appeared_count=appeared_count,
         visibility_score=visibility_score,
+        batch_id=batch_id,  # NEW
     )
 
 
@@ -1056,6 +1068,9 @@ def run_llm_batch_async(
     # Determine the tenant schema for this request
     tenant_schema = get_tenant_schema(request)
 
+    # NEW: create a batch_id here and pass to background task
+    batch_id = uuid.uuid4().hex
+
     # Schedule background job
     background_tasks.add_task(
         _run_llm_batch_background,
@@ -1063,9 +1078,10 @@ def run_llm_batch_async(
         product_id=payload.product_id,
         pack_id=payload.pack_id,
         model=payload.model,
+        batch_id=batch_id,  # NEW
     )
 
-    return LLMRunBatchStartResponse(status="started")
+    return LLMRunBatchStartResponse(status="started", batch_id=batch_id)
 
 
 @app.post("/generate-prompt-pack", response_model=GeneratePromptPackResponse)
@@ -1235,7 +1251,25 @@ async def visibility_report(
     parsed = urlparse(product.url)
     domain = parsed.netloc
 
-    tests = db.query(LLMTest).filter(LLMTest.product_id == product.id).all()
+    # Build base query for tests
+    tests_query = db.query(LLMTest).filter(LLMTest.product_id == product.id)
+
+    # Optional: restrict to a specific pack (pack_key)
+    if payload.pack_id:
+        db_pack = (
+            db.query(PromptPack)
+            .filter(PromptPack.pack_key == payload.pack_id)
+            .one_or_none()
+        )
+        if not db_pack:
+            raise HTTPException(status_code=404, detail="Prompt pack not found for report")
+        tests_query = tests_query.filter(LLMTest.pack_id == db_pack.id)
+
+    # Optional: restrict to a specific batch
+    if payload.batch_id:
+        tests_query = tests_query.filter(LLMTest.batch_id == payload.batch_id)
+
+    tests = tests_query.all()
 
     total_tests = len(tests)
     appeared_count = sum(1 for t in tests if t.appeared)
@@ -1256,6 +1290,8 @@ async def visibility_report(
         "total_tests": total_tests,
         "appeared_count": appeared_count,
         "overall_visibility_score": overall_visibility,
+        "pack_id": payload.pack_id,
+        "batch_id": payload.batch_id,
         "per_model": {
             model: {
                 "total": data["total"],
@@ -1301,6 +1337,7 @@ async def visibility_report(
         file_path=file_path,
         download_url=download_url,
     )
+
 
 @app.get("/download/prompt-pack/{pack_id}")
 def download_prompt_pack(
@@ -1355,11 +1392,13 @@ def download_report(
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
 def prompt_stats(
     pack_id: str,
+    batch_id: Optional[str] = None,  # NEW
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     Returns per-prompt performance for a given pack_id (pack_key).
+    If batch_id is provided, stats are restricted to that batch only.
     """
     db_pack = (
         db.query(PromptPack)
@@ -1379,7 +1418,12 @@ def prompt_stats(
     results: List[PromptPerformance] = []
 
     for prompt in prompts:
-        tests = db.query(LLMTest).filter(LLMTest.prompt_id == prompt.id).all()
+        q = db.query(LLMTest).filter(LLMTest.prompt_id == prompt.id)
+
+        if batch_id:
+            q = q.filter(LLMTest.batch_id == batch_id)
+
+        tests = q.all()
         total_runs = len(tests)
         appeared_count = sum(1 for t in tests if t.appeared)
         visibility_score = (appeared_count / total_runs) if total_runs > 0 else 0.0

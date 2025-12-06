@@ -9,7 +9,7 @@ class LLMTest(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # NEW: which batch run this result belongs to
+    # which batch run this result belongs to
     batch_id = Column(String, index=True, nullable=True)
 
     # Which product this test was run for
@@ -27,6 +27,10 @@ class LLMTest(Base):
     appeared = Column(Boolean, default=False)
     matched_domain = Column(String, nullable=True)
     snippet = Column(Text, nullable=True)
+
+    # NEW – full LLM answer content
+    llm_answer = Column(Text, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

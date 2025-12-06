@@ -9,10 +9,13 @@ class LLMTest(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
+    # NEW: which batch run this result belongs to
+    batch_id = Column(String, index=True, nullable=True)
+
     # Which product this test was run for
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
 
-    # NEW: link each test back to a specific prompt & pack  (if applicable)
+    # link each test back to a specific prompt & pack (if applicable)
     prompt_id = Column(Integer, ForeignKey("prompts.id"), nullable=True)
     pack_id = Column(Integer, ForeignKey("prompt_packs.id"), nullable=True)
 
@@ -29,5 +32,3 @@ class LLMTest(Base):
     # Relationships
     prompt_obj = relationship("Prompt", back_populates="tests")
     pack = relationship("PromptPack")
-    # You can optionally add a Product relationship if you want:
-    # product = relationship("Product", back_populates="llm_tests")

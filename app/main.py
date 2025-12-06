@@ -52,6 +52,10 @@ from app.services.auth_utils import (
     create_access_token,
     decode_access_token,
 )
+# NEW: competitor report service
+from app.services.batch_competitor_report import (
+    generate_competitor_report_markdown_for_batch,
+)
 
 load_dotenv()
 
@@ -397,6 +401,24 @@ class PromptPerformance(BaseModel):
     visibility_score: float
 
 
+# ----- NEW: Batch competitor report models -----
+
+class BatchCompetitorReportRequest(BaseModel):
+    product_id: int
+    batch_id: str
+    model: Optional[str] = DEFAULT_REPORT_MODEL
+
+
+class BatchCompetitorReportResponse(BaseModel):
+    product_id: int
+    batch_id: str
+    pack_id: Optional[str] = None
+    model_used: str
+    report_markdown: str
+    file_path: str
+    download_url: str
+
+
 # ----- Auth Pydantic models -----
 
 class Token(BaseModel):
@@ -567,6 +589,7 @@ def _run_llm_batch_background(
                 appeared=res["appeared"],
                 matched_domain=res["matched"] or None,
                 snippet=res["snippet"],
+                llm_answer=res.get("answer"),  # NEW – full answer if available
             )
             rows.append(row)
 
@@ -880,6 +903,7 @@ def run_llm_check(
         appeared=result["appeared"],
         matched_domain=result["matched"] or None,
         snippet=result["snippet"],
+        llm_answer=result.get("answer"),  # NEW – full answer if available
     )
     db.add(row)
     db.commit()
@@ -1019,6 +1043,7 @@ def run_llm_batch(
             appeared=res["appeared"],
             matched_domain=res["matched"] or None,
             snippet=res["snippet"],
+            llm_answer=res.get("answer"),  # NEW – full answer if available
         )
         rows.append(row)
 
@@ -1333,6 +1358,96 @@ async def visibility_report(
     return VisibilityReportResponse(
         product_id=product.id,
         model_used=payload.model,
+        report_markdown=report_md,
+        file_path=file_path,
+        download_url=download_url,
+    )
+
+
+# ----- NEW: Batch competitor analysis endpoint -----
+
+@app.post("/batch-competitor-report", response_model=BatchCompetitorReportResponse)
+async def batch_competitor_report(
+    payload: BatchCompetitorReportRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Generate a fully LLM-written competitor analysis report for a specific batch.
+
+    Uses:
+    - all LLMTest rows for (product_id, batch_id)
+    - full answers (llm_answer) where available, falling back to snippet
+    """
+    product = (
+        db.query(Product)
+        .filter(Product.id == payload.product_id)
+        .one_or_none()
+    )
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    tests = (
+        db.query(LLMTest)
+        .filter(
+            LLMTest.product_id == product.id,
+            LLMTest.batch_id == payload.batch_id,
+        )
+        .all()
+    )
+
+    if not tests:
+        raise HTTPException(
+            status_code=404,
+            detail="No LLM tests found for this batch and product.",
+        )
+
+    # Use pack from first row (all rows in a batch share same pack_id)
+    pack = None
+    if tests[0].pack_id is not None:
+        pack = (
+            db.query(PromptPack)
+            .filter(PromptPack.id == tests[0].pack_id)
+            .one_or_none()
+        )
+
+    model_to_use = payload.model or DEFAULT_REPORT_MODEL
+
+    try:
+        report_md = generate_competitor_report_markdown_for_batch(
+            product=product,
+            pack=pack,
+            tests=tests,
+            model=model_to_use,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating competitor report: {e}",
+        )
+
+    # Save markdown to file, reuse existing report mechanism
+    try:
+        file_path = save_report_markdown_to_file(product.id, report_md)
+        base_url = str(request.base_url).rstrip("/")
+        filename = os.path.basename(file_path)
+        download_url = f"{base_url}/download/report/{filename}"
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error saving competitor report: {e}",
+        )
+
+    pack_key = None
+    if pack:
+        pack_key = pack.pack_key
+
+    return BatchCompetitorReportResponse(
+        product_id=product.id,
+        batch_id=payload.batch_id,
+        pack_id=pack_key,
+        model_used=model_to_use,
         report_markdown=report_md,
         file_path=file_path,
         download_url=download_url,

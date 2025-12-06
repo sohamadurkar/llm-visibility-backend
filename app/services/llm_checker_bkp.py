@@ -42,14 +42,6 @@ def run_llm_visibility_check(
 ) -> dict:
     """
     Single-prompt version (used by /run-llm-check).
-    Returns:
-      {
-        "appeared": bool,
-        "matched": str,
-        "snippet": str,
-        "answer": str,   # full answer
-        "model": str
-      }
     """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set in environment")
@@ -85,7 +77,6 @@ def run_llm_visibility_check(
         "appeared": appeared,
         "matched": matched,
         "snippet": snippet,
-        "answer": answer,        # NEW: full answer
         "model": model_to_use,
     }
 
@@ -98,15 +89,7 @@ def run_llm_visibility_batch_check(
     """
     Batch version: sends MANY prompts in ONE OpenAI call and returns
     a list of results (same order as `prompts`).
-
-    Each result has:
-      {
-        "appeared": bool,
-        "matched": str,
-        "snippet": str,
-        "answer": str,   # full answer
-        "model": str
-      }
+    Each result has: appeared, matched, snippet, model.
     """
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set in environment")
@@ -189,7 +172,6 @@ Return STRICTLY valid JSON in this format:
                 "appeared": appeared,
                 "matched": matched,
                 "snippet": snippet,
-                "answer": answer,   # NEW: full answer
                 "model": model_to_use,
             }
         )
