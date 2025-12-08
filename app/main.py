@@ -461,7 +461,85 @@ class ClientRegistrationResponse(BaseModel):
     message: str
 
 
+# ----- Behaviour classifier for prompts -----
+
+
+def classify_prompt_behaviour(text: str) -> str:
+    """
+    Heuristic classifier that assigns a behaviour label to a prompt
+    based on its wording. Matches the buyer modes used in generation:
+      - discovery
+      - close_alternative
+      - budget
+      - occasion
+      - fit_practical
+      - trend_popularity
+      - channel
+    """
+    t = text.lower()
+
+    # Budget / price-led
+    if any(kw in t for kw in [
+        "under £", "under$", "cheap", "cheapest", "budget",
+        "affordable", "on sale", "discount", "deal", "best price",
+        "good value", "value for money",
+    ]):
+        return "budget"
+
+    # Occasion / use-case
+    if any(kw in t for kw in [
+        "wedding", "bridal", "office", "work", "interview", "party",
+        "evening", "casual", "formal", "school", "holiday", "vacation",
+        "gift", "present", "birthday", "anniversary", "christmas",
+        "new year", "weekend", "summer", "winter",
+    ]):
+        return "occasion"
+
+    # Fit / comfort / practicality
+    if any(kw in t for kw in [
+        "comfortable", "comfort", "all-day", "all day",
+        "wide fit", "narrow fit", "arch support", "support",
+        "durable", "waterproof", "breathable", "lightweight",
+        "for walking", "for running", "for standing", "for travel",
+    ]):
+        return "fit_practical"
+
+    # Trend / popularity / best-rated
+    if any(kw in t for kw in [
+        "trending", "on trend", "fashionable", "stylish",
+        "most popular", "best rated", "top rated", "top-rated",
+        "best sellers", "best-selling", "viral", "popular right now",
+    ]):
+        return "trend_popularity"
+
+    # Channel / where to buy
+    if any(kw in t for kw in [
+        "online in the uk", "online uk", "uk websites", "uk shops",
+        "high street", "department stores", "stores near me",
+        "near me", "local shops",
+    ]):
+        return "channel"
+
+    # Close-alternative search (similar / like this)
+    if any(kw in t for kw in [
+        "similar", "alternatives", "like this", "like these",
+        "instead of", "something like", "similar style", "similar design",
+    ]):
+        return "close_alternative"
+
+    # Generic discovery (fallback)
+    if any(kw in t for kw in [
+        "best", "good", "recommend", "show me", "which", "what are",
+        "ideas for", "options for", "options to",
+    ]):
+        return "discovery"
+
+    # Default bucket
+    return "discovery"
+
+
 # ----- Auth helpers (dependencies) -----
+
 
 def get_current_user(
     request: Request,
@@ -558,10 +636,12 @@ def _run_llm_batch_background(
 
         for idx, prompt_text in enumerate(prompts_list):
             if idx not in existing_prompts:
+                behaviour = classify_prompt_behaviour(prompt_text)
                 prompt_row = Prompt(
                     pack_id=db_pack.id,
                     index=idx,
                     text=prompt_text,
+                    behaviour=behaviour,
                 )
                 db.add(prompt_row)
                 db.flush()
@@ -1000,10 +1080,12 @@ def run_llm_batch(
     # Ensure Prompt row exists for each index
     for idx, prompt_text in enumerate(prompts_list):
         if idx not in existing_prompts:
+            behaviour = classify_prompt_behaviour(prompt_text)
             prompt_row = Prompt(
                 pack_id=db_pack.id,
                 index=idx,
                 text=prompt_text,
+                behaviour=behaviour,
             )
             db.add(prompt_row)
             db.flush()
@@ -1164,11 +1246,13 @@ def generate_prompt_pack(
 
     prompts = pack.get("prompts", [])
     for idx, text in enumerate(prompts):
+        behaviour = classify_prompt_behaviour(text)
         db.add(
             Prompt(
                 pack_id=db_pack.id,
                 index=idx,
                 text=text,
+                behaviour=behaviour,
             )
         )
 
@@ -1243,11 +1327,13 @@ def generate_google_prompt_pack(
 
     prompts = pack.get("prompts", [])
     for idx, text in enumerate(prompts):
+        behaviour = classify_prompt_behaviour(text)
         db.add(
             Prompt(
                 pack_id=db_pack.id,
                 index=idx,
                 text=text,
+                behaviour=behaviour,
             )
         )
 
