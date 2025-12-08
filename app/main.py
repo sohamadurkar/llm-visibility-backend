@@ -401,14 +401,6 @@ class PromptPerformance(BaseModel):
     visibility_score: float
 
 
-class TopPromptResult(BaseModel):
-    prompt_id: int
-    text: str
-    appeared_count: int
-    total_runs: int
-    visibility_score: float
-
-
 # ----- NEW: Batch competitor report models -----
 
 class BatchCompetitorReportRequest(BaseModel):
@@ -1645,71 +1637,6 @@ def prompt_stats(
                 total_runs=total_runs,
                 appeared_count=appeared_count,
                 visibility_score=visibility_score,
-            )
-        )
-
-
-@app.get("/top-prompts", response_model=List[TopPromptResult])
-def top_prompts(
-    product_id: Optional[int] = None,
-    pack_id: Optional[str] = None,
-    batch_id: Optional[str] = None,
-    limit: int = 10,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Returns the top N prompts with the highest 'appeared' count.
-    Optionally filter by product, pack_key, or batch_id.
-    """
-
-    # Base query joining prompts and LLM tests
-    q = (
-        db.query(
-            Prompt.id.label("prompt_id"),
-            Prompt.text.label("text"),
-            db.func.count(LLMTest.id).label("total_runs"),
-            db.func.sum(db.case((LLMTest.appeared == True, 1), else_=0)).label("appeared_count"),
-        )
-        .join(LLMTest, LLMTest.prompt_id == Prompt.id)
-        .group_by(Prompt.id)
-    )
-
-    # Optional filters
-    if product_id:
-        q = q.filter(LLMTest.product_id == product_id)
-
-    if pack_id:
-        db_pack = (
-            db.query(PromptPack)
-            .filter(PromptPack.pack_key == pack_id)
-            .one_or_none()
-        )
-        if not db_pack:
-            raise HTTPException(status_code=404, detail="Prompt pack not found")
-        q = q.filter(Prompt.pack_id == db_pack.id)
-
-    if batch_id:
-        q = q.filter(LLMTest.batch_id == batch_id)
-
-    # Order + limit
-    q = q.order_by(db.desc("appeared_count")).limit(limit)
-
-    rows = q.all()
-
-    results: List[TopPromptResult] = []
-    for row in rows:
-        appeared = row.appeared_count or 0
-        total = row.total_runs or 0
-        score = (appeared / total) if total > 0 else 0.0
-
-        results.append(
-            TopPromptResult(
-                prompt_id=row.prompt_id,
-                text=row.text,
-                appeared_count=appeared,
-                total_runs=total,
-                visibility_score=score,
             )
         )
 
