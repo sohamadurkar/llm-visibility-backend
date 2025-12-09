@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, HttpUrl, EmailStr
@@ -22,6 +22,7 @@ from app.models.models import Website, Product
 from app.models.llmtest import LLMTest
 from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
+from app.models.content_models import ContentArticle
 from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
 
 from app.services.llm_checker import (
@@ -55,6 +56,10 @@ from app.services.auth_utils import (
 # NEW: competitor report service
 from app.services.batch_competitor_report import (
     generate_competitor_report_markdown_for_batch,
+)
+from app.services.content_generator import (
+    ARTICLE_ANGLES,
+    generate_article_html_for_angle,
 )
 
 load_dotenv()
@@ -401,6 +406,32 @@ class PromptPerformance(BaseModel):
     visibility_score: float
 
 
+class ArticleOut(BaseModel):
+    id: int
+    product_id: int
+    angle_key: str
+    angle_label: str
+    title: str
+    slug: str
+    meta_description: Optional[str] = None
+    is_published: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class GenerateArticlesRequest(BaseModel):
+    """
+    Optional subset of angles to regenerate.
+    If omitted, we generate all 10 default angles.
+    """
+    angles: Optional[List[str]] = None
+    model: Optional[str] = DEFAULT_REPORT_MODEL
+
+
+
 # ----- NEW: Batch competitor report models -----
 
 class BatchCompetitorReportRequest(BaseModel):
@@ -536,6 +567,17 @@ def classify_prompt_behaviour(text: str) -> str:
 
     # Default bucket
     return "discovery"
+
+
+
+def _article_slug(product_id: int, angle_key: str) -> str:
+    """
+    Generate a stable slug per (product, angle).
+    Example: product 12, angle 'fit_comfort' -> 'product-12-fit-comfort'
+    """
+    safe_angle = angle_key.replace("_", "-")
+    return f"product-{product_id}-{safe_angle}"
+
 
 
 # ----- Auth helpers (dependencies) -----
@@ -1588,6 +1630,195 @@ def download_report(
         media_type="text/markdown",
         filename=filename,
     )
+
+
+
+@app.get("/public/{tenant_code}/articles/{slug}", response_class=HTMLResponse)
+def get_public_article(
+    tenant_code: str,
+    slug: str,
+):
+    """
+    Public HTML endpoint for a content article.
+
+    This is intended for:
+    - human readers (can be linked from your frontend)
+    - search engines and LLMs to crawl
+
+    Tenant is encoded in the path, so we can route to the correct schema
+    without relying on the X-Tenant header.
+    """
+    # Normalise + validate tenant -> schema
+    schema = _normalize_schema_name(tenant_code)
+    _ensure_tenant_schema(schema)
+
+    db = SessionLocal()
+    try:
+        db.execute(text(f'SET search_path TO "{schema}"'))
+
+        article = (
+            db.query(ContentArticle)
+            .filter(
+                ContentArticle.slug == slug,
+                ContentArticle.is_published == True,
+            )
+            .one_or_none()
+        )
+        if not article:
+            raise HTTPException(status_code=404, detail="Article not found")
+
+        # Basic HTML wrapper around the stored fragment
+        # (content_html already contains <article>...</article>)
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{article.title}</title>
+  <meta name="description" content="{article.meta_description or ''}">
+</head>
+<body>
+  {article.content_html}
+</body>
+</html>
+"""
+        return HTMLResponse(content=html, status_code=200)
+    finally:
+        db.close()
+
+
+
+@app.get("/products/{product_id}/articles", response_model=List[ArticleOut])
+def list_product_articles(
+    product_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    product = db.query(Product).filter(Product.id == product_id).one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    articles = (
+        db.query(ContentArticle)
+        .filter(ContentArticle.product_id == product.id)
+        .order_by(ContentArticle.angle_key)
+        .all()
+    )
+
+    results: List[ArticleOut] = []
+    for a in articles:
+        angle_label = ARTICLE_ANGLES.get(a.angle_key, a.angle_key)
+        results.append(
+            ArticleOut(
+                id=a.id,
+                product_id=a.product_id,
+                angle_key=a.angle_key,
+                angle_label=angle_label,
+                title=a.title,
+                slug=a.slug,
+                meta_description=a.meta_description,
+                is_published=a.is_published,
+                created_at=a.created_at,
+                updated_at=a.updated_at,
+            )
+        )
+    return results
+
+
+@app.post("/products/{product_id}/articles/generate", response_model=List[ArticleOut])
+async def generate_product_articles(
+    product_id: int,
+    payload: GenerateArticlesRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    product = db.query(Product).filter(Product.id == product_id).one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    parsed = urlparse(product.url)
+    domain = parsed.netloc
+
+    # Determine which angles to generate
+    if payload.angles:
+        angle_keys = []
+        for key in payload.angles:
+            if key not in ARTICLE_ANGLES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown angle key: {key}",
+                )
+            angle_keys.append(key)
+    else:
+        angle_keys = list(ARTICLE_ANGLES.keys())
+
+    # Try to get a page snapshot to ground the content
+    page_snapshot = None
+    try:
+        html = await fetch_page_html_via_scraperapi(product.url)
+        page_snapshot = build_page_snapshot(html)
+    except Exception:
+        # If snapshot fails, we still generate more generic content
+        page_snapshot = None
+
+    generated_articles: List[ArticleOut] = []
+
+    for angle_key in angle_keys:
+        angle_label = ARTICLE_ANGLES[angle_key]
+
+        article_data = generate_article_html_for_angle(
+            product_title=product.title or product.url,
+            product_url=product.url,
+            domain=domain,
+            angle_key=angle_key,
+            angle_label=angle_label,
+            page_snapshot=page_snapshot,
+            model=payload.model,
+        )
+
+        slug = _article_slug(product.id, angle_key)
+
+        # Upsert behaviour: one article per (product, angle_key)
+        article = (
+            db.query(ContentArticle)
+            .filter(
+                ContentArticle.product_id == product.id,
+                ContentArticle.angle_key == angle_key,
+            )
+            .one_or_none()
+        )
+
+        if not article:
+            article = ContentArticle(
+                product_id=product.id,
+                angle_key=angle_key,
+                slug=slug,
+            )
+            db.add(article)
+
+        article.title = article_data["title"]
+        article.meta_description = article_data.get("meta_description") or None
+        article.content_html = article_data["content_html"]
+        article.is_published = True
+
+        db.flush()
+
+        generated_articles.append(
+            ArticleOut(
+                id=article.id,
+                product_id=article.product_id,
+                angle_key=article.angle_key,
+                angle_label=angle_label,
+                title=article.title,
+                slug=article.slug,
+                meta_description=article.meta_description,
+                is_published=article.is_published,
+                created_at=article.created_at,
+                updated_at=article.updated_at,
+            )
+        )
+
+    db.commit()
+    return generated_articles
 
 
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
