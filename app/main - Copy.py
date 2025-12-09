@@ -415,7 +415,6 @@ class ArticleOut(BaseModel):
     slug: str
     meta_description: Optional[str] = None
     is_published: bool
-    public_url: str
     created_at: datetime
     updated_at: datetime
 
@@ -1691,7 +1690,6 @@ def get_public_article(
 @app.get("/products/{product_id}/articles", response_model=List[ArticleOut])
 def list_product_articles(
     product_id: int,
-    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1706,26 +1704,9 @@ def list_product_articles(
         .all()
     )
 
-    # Figure out which tenant code to use in the public URL path
-    tenant_raw = request.headers.get(TENANT_HEADER) or ""
-    tenant_code = (tenant_raw.strip().lower() or "public")
-
-    # If someone ever sends "tenant_xxx" as header, strip the prefix for the URL path
-    if tenant_code.startswith("tenant_"):
-        tenant_code_for_path = tenant_code[len("tenant_") :]
-    else:
-        tenant_code_for_path = tenant_code
-
-    base_url = str(request.base_url).rstrip("/")
-
     results: List[ArticleOut] = []
     for a in articles:
         angle_label = ARTICLE_ANGLES.get(a.angle_key, a.angle_key)
-
-        public_url = (
-            f"{base_url}/public/{tenant_code_for_path}/articles/{a.slug}"
-        )
-
         results.append(
             ArticleOut(
                 id=a.id,
@@ -1736,13 +1717,11 @@ def list_product_articles(
                 slug=a.slug,
                 meta_description=a.meta_description,
                 is_published=a.is_published,
-                public_url=public_url,
                 created_at=a.created_at,
                 updated_at=a.updated_at,
             )
         )
     return results
-
 
 
 @app.post("/products/{product_id}/articles/generate", response_model=List[ArticleOut])
