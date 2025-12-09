@@ -68,7 +68,7 @@ app = FastAPI(title="LLM Visibility API", version="0.7.0")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-# CORS setup
+#  CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://llm-visibility-frontend-production.up.railway.app"],
