@@ -1749,6 +1749,7 @@ def list_product_articles(
 async def generate_product_articles(
     product_id: int,
     payload: GenerateArticlesRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1782,6 +1783,18 @@ async def generate_product_articles(
         page_snapshot = None
 
     generated_articles: List[ArticleOut] = []
+
+    # 🔹 Figure out tenant code + base URL to build public_url
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip().lower() or "public"
+
+    # If header was "tenant_xxx", strip prefix for the URL path
+    if tenant_code.startswith("tenant_"):
+        tenant_code_for_path = tenant_code[len("tenant_") :]
+    else:
+        tenant_code_for_path = tenant_code
+
+    base_url = str(request.base_url).rstrip("/")
 
     for angle_key in angle_keys:
         angle_label = ARTICLE_ANGLES[angle_key]
@@ -1823,6 +1836,11 @@ async def generate_product_articles(
 
         db.flush()
 
+        # 🔹 Build the public URL exactly like the GET endpoint
+        public_url = (
+            f"{base_url}/public/{tenant_code_for_path}/articles/{article.slug}"
+        )
+
         generated_articles.append(
             ArticleOut(
                 id=article.id,
@@ -1833,6 +1851,7 @@ async def generate_product_articles(
                 slug=article.slug,
                 meta_description=article.meta_description,
                 is_published=article.is_published,
+                public_url=public_url,  # ✅ REQUIRED FIELD
                 created_at=article.created_at,
                 updated_at=article.updated_at,
             )
@@ -1840,6 +1859,7 @@ async def generate_product_articles(
 
     db.commit()
     return generated_articles
+
 
 
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
