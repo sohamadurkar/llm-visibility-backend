@@ -273,6 +273,20 @@ def get_db(request: Request):
         # Set search_path on this session so all queries are schema-scoped
         db.execute(text(f'SET search_path TO "{schema}"'))
 
+        # 🔹 Lightweight migration: make sure angle_label exists in this schema too
+        try:
+            db.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS content_articles
+                    ADD COLUMN IF NOT EXISTS angle_label VARCHAR
+                    """
+                )
+            )
+        except Exception:
+            # Don't break requests if migration fails for some reason
+            pass
+
         yield db
     finally:
         db.close()
@@ -283,6 +297,18 @@ def get_db(request: Request):
 def on_startup():
     # Base public schema – useful for default/demo tenant
     Base.metadata.create_all(bind=engine)
+
+    # 🔹 Ensure new angle_label column exists on public.content_articles
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS content_articles
+                ADD COLUMN IF NOT EXISTS angle_label VARCHAR
+                """
+            )
+        )
 
 
 # --- Schemas (Pydantic models) ---
