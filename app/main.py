@@ -299,10 +299,10 @@ def on_startup():
     Base.metadata.create_all(bind=engine)
 
     # 🔹 Ensure new angle_label column exists on public.content_articles
-    from sqlalchemy import text
+    from sqlalchemy import text as _text
     with engine.begin() as conn:
         conn.execute(
-            text(
+            _text(
                 """
                 ALTER TABLE IF EXISTS content_articles
                 ADD COLUMN IF NOT EXISTS angle_label VARCHAR
@@ -598,11 +598,13 @@ def classify_prompt_behaviour(text: str) -> str:
 
 def _article_slug(product_id: int, angle_key: str) -> str:
     """
-    Generate a stable slug per (product, angle).
-    Example: product 12, angle 'fit_comfort' -> 'product-12-fit-comfort'
+    Generate a UNIQUE slug per article, even if the same angle_key is reused.
+    Example: product 12, angle 'fit_comfort' -> 'product-12-fit-comfort-1a2b3c4d'
     """
-    safe_angle = angle_key.replace("_", "-")
-    return f"product-{product_id}-{safe_angle}"
+    import re as _re
+    safe_angle = _re.sub(r"[^a-z0-9\-]+", "-", angle_key.lower().replace("_", "-")).strip("-")
+    short = uuid.uuid4().hex[:8]
+    return f"product-{product_id}-{safe_angle}-{short}"
 
 
 # ----- Auth helpers (dependencies) -----
@@ -1927,32 +1929,20 @@ async def generate_product_articles(
             model=payload.model,
         )
 
+        # 🔹 ALWAYS create a NEW article row – do NOT overwrite existing ones
         slug = _article_slug(product.id, angle_key)
 
-        # Upsert behaviour: one article per (product, angle_key)
-        article = (
-            db.query(ContentArticle)
-            .filter(
-                ContentArticle.product_id == product.id,
-                ContentArticle.angle_key == angle_key,
-            )
-            .one_or_none()
+        article = ContentArticle(
+            product_id=product.id,
+            angle_key=angle_key,
+            angle_label=angle_label,
+            slug=slug,
+            title=article_data["title"],
+            meta_description=article_data.get("meta_description") or None,
+            content_html=article_data["content_html"],
+            is_published=True,
         )
-
-        if not article:
-            article = ContentArticle(
-                product_id=product.id,
-                angle_key=angle_key,
-                slug=slug,
-            )
-            db.add(article)
-
-        article.angle_label = angle_label  # 🔹 store dynamic label
-        article.title = article_data["title"]
-        article.meta_description = article_data.get("meta_description") or None
-        article.content_html = article_data["content_html"]
-        article.is_published = True
-
+        db.add(article)
         db.flush()
 
         # 🔹 Build the public URL exactly like the GET endpoint
