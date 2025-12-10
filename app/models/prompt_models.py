@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.db.engine import Base
 
@@ -26,6 +27,8 @@ class PromptPack(Base):
     product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    pack_json = Column(JSONB, nullable=True)  # NEW – full pack definition
 
     product = relationship("Product", backref="prompt_packs")
     prompts = relationship("Prompt", back_populates="pack", cascade="all, delete-orphan")

@@ -432,7 +432,6 @@ class GenerateArticlesRequest(BaseModel):
     model: Optional[str] = DEFAULT_REPORT_MODEL
 
 
-
 # ----- NEW: Batch competitor report models -----
 
 class BatchCompetitorReportRequest(BaseModel):
@@ -570,7 +569,6 @@ def classify_prompt_behaviour(text: str) -> str:
     return "discovery"
 
 
-
 def _article_slug(product_id: int, angle_key: str) -> str:
     """
     Generate a stable slug per (product, angle).
@@ -578,7 +576,6 @@ def _article_slug(product_id: int, angle_key: str) -> str:
     """
     safe_angle = angle_key.replace("_", "-")
     return f"product-{product_id}-{safe_angle}"
-
 
 
 # ----- Auth helpers (dependencies) -----
@@ -644,32 +641,41 @@ def _run_llm_batch_background(
         if not domain:
             return
 
-        try:
-            pack_data = load_prompt_pack(pack_id)
-        except FileNotFoundError:
-            return
-
-        prompts_list = pack_data.get("prompts", [])
-        if not prompts_list:
-            return
-
-        # Ensure PromptPack exists in DB
+        # Load pack from DB first, then from file if needed
         db_pack = (
             db.query(PromptPack)
             .filter(PromptPack.pack_key == pack_id)
             .one_or_none()
         )
-        if not db_pack:
-            db_pack = PromptPack(
-                pack_key=pack_id,
-                name=pack_data.get("name"),
-                category=pack_data.get("category"),
-                source=pack_data.get("source") or "unknown",
-                language=pack_data.get("language", "en"),
-                product_id=product.id,
-            )
-            db.add(db_pack)
-            db.flush()
+
+        pack_data = None
+
+        if db_pack and db_pack.pack_json:
+            pack_data = db_pack.pack_json
+        else:
+            try:
+                pack_data = load_prompt_pack(pack_id)
+            except FileNotFoundError:
+                return  # nothing to do
+
+            if db_pack:
+                db_pack.pack_json = pack_data
+            else:
+                db_pack = PromptPack(
+                    pack_key=pack_id,
+                    name=pack_data.get("name"),
+                    category=pack_data.get("category"),
+                    source=pack_data.get("source") or "unknown",
+                    language=pack_data.get("language", "en"),
+                    product_id=product.id,
+                    pack_json=pack_data,
+                )
+                db.add(db_pack)
+                db.flush()
+
+        prompts_list = pack_data.get("prompts", []) if isinstance(pack_data, dict) else []
+        if not prompts_list:
+            return
 
         # Ensure Prompt rows for each index
         existing_prompts = {
@@ -1085,35 +1091,48 @@ def run_llm_batch(
     if not domain:
         raise HTTPException(status_code=400, detail="Invalid product URL domain")
 
-    # Load pack from JSON
-    try:
-        pack_data = load_prompt_pack(payload.pack_id)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-    prompts_list = pack_data.get("prompts", [])
-    if not prompts_list:
-        raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
-
-    total = len(prompts_list)
-
-    # Ensure PromptPack exists in DB
+    # --- Load pack from DB first, fall back to JSON file for legacy packs ---
     db_pack = (
         db.query(PromptPack)
         .filter(PromptPack.pack_key == payload.pack_id)
         .one_or_none()
     )
-    if not db_pack:
-        db_pack = PromptPack(
-            pack_key=payload.pack_id,
-            name=pack_data.get("name"),
-            category=pack_data.get("category"),
-            source=pack_data.get("source") or "unknown",
-            language=pack_data.get("language", "en"),
-            product_id=product.id,
-        )
-        db.add(db_pack)
-        db.flush()
+
+    pack_data = None
+
+    if db_pack and db_pack.pack_json:
+        pack_data = db_pack.pack_json
+    else:
+        # Legacy behaviour – try file
+        try:
+            pack_data = load_prompt_pack(payload.pack_id)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Prompt pack not found. If this is an old pack, please regenerate it.",
+            )
+
+        # If we had a db_pack but no JSON, backfill it
+        if db_pack:
+            db_pack.pack_json = pack_data
+        else:
+            db_pack = PromptPack(
+                pack_key=payload.pack_id,
+                name=pack_data.get("name"),
+                category=pack_data.get("category"),
+                source=pack_data.get("source") or "unknown",
+                language=pack_data.get("language", "en"),
+                product_id=product.id,
+                pack_json=pack_data,
+            )
+            db.add(db_pack)
+            db.flush()
+
+    prompts_list = pack_data.get("prompts", []) if isinstance(pack_data, dict) else []
+    if not prompts_list:
+        raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
+
+    total = len(prompts_list)
 
     # Load existing Prompt rows for this pack
     existing_prompts = {
@@ -1206,12 +1225,42 @@ def run_llm_batch_async(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    try:
-        pack_data = load_prompt_pack(payload.pack_id)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    # Validate pack exists and has prompts (DB first, then file)
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == payload.pack_id)
+        .one_or_none()
+    )
 
-    prompts_list = pack_data.get("prompts", [])
+    pack_data = None
+
+    if db_pack and db_pack.pack_json:
+        pack_data = db_pack.pack_json
+    else:
+        try:
+            pack_data = load_prompt_pack(payload.pack_id)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Prompt pack not found. If this is an old pack, please regenerate it.",
+            )
+
+        if db_pack:
+            db_pack.pack_json = pack_data
+        else:
+            db_pack = PromptPack(
+                pack_key=payload.pack_id,
+                name=pack_data.get("name"),
+                category=pack_data.get("category"),
+                source=pack_data.get("source") or "unknown",
+                language=pack_data.get("language", "en"),
+                product_id=product.id,
+                pack_json=pack_data,
+            )
+            db.add(db_pack)
+            db.flush()
+
+    prompts_list = pack_data.get("prompts", []) if isinstance(pack_data, dict) else []
     if not prompts_list:
         raise HTTPException(status_code=400, detail="Prompt pack has no prompts")
 
@@ -1280,9 +1329,18 @@ def generate_prompt_pack(
             source=pack.get("source") or "auto_generated_high_intent",
             language=pack.get("language", "en"),
             product_id=product.id,
+            pack_json=pack,
         )
         db.add(db_pack)
         db.flush()
+    else:
+        # If re-generating, update metadata + JSON
+        db_pack.name = pack.get("name")
+        db_pack.category = pack.get("category")
+        db_pack.source = pack.get("source") or db_pack.source
+        db_pack.language = pack.get("language", "en")
+        db_pack.product_id = product.id
+        db_pack.pack_json = pack
 
     # Clear existing prompts for this pack (if re-generating)
     db.query(Prompt).filter(Prompt.pack_id == db_pack.id).delete()
@@ -1361,9 +1419,18 @@ def generate_google_prompt_pack(
             source=pack.get("source") or "google_people_also_ask",
             language=pack.get("language", "en"),
             product_id=product.id,
+            pack_json=pack,  # NEW – store full JSON
         )
         db.add(db_pack)
         db.flush()
+    else:
+        # If re-generating, update metadata + JSON
+        db_pack.name = pack.get("name")
+        db_pack.category = pack.get("category")
+        db_pack.source = pack.get("source") or db_pack.source
+        db_pack.language = pack.get("language", "en")
+        db_pack.product_id = product.id
+        db_pack.pack_json = pack
 
     # Clear existing prompts for this pack (if re-generating)
     db.query(Prompt).filter(Prompt.pack_id == db_pack.id).delete()
@@ -1590,10 +1657,9 @@ def download_prompt_pack(
     """
     Download a prompt pack JSON file by pack_id.
 
-    Note:
-    - We do not enforce a tenant DB check here because the browser
-      cannot send the X-Tenant header on a normal link click.
-    - We still validate the pack_id to avoid path traversal.
+    Behaviour:
+    - Try to serve the JSON file from disk (legacy behaviour).
+    - If it's missing, fall back to the DB-stored pack_json.
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
@@ -1601,14 +1667,27 @@ def download_prompt_pack(
     fname = f"{pack_id}.json"
     fpath = os.path.join(PROMPT_PACKS_DIR, fname)
 
-    if not os.path.isfile(fpath):
-        raise HTTPException(status_code=404, detail="Prompt pack file not found")
+    if os.path.isfile(fpath):
+        return FileResponse(
+            path=fpath,
+            media_type="application/json",
+            filename=fname,
+        )
 
-    return FileResponse(
-        path=fpath,
-        media_type="application/json",
-        filename=fname,
-    )
+    # Fallback: serve from DB
+    db = SessionLocal()
+    try:
+        pack = (
+            db.query(PromptPack)
+            .filter(PromptPack.pack_key == pack_id)
+            .one_or_none()
+        )
+        if not pack or not pack.pack_json:
+            raise HTTPException(status_code=404, detail="Prompt pack not found")
+
+        return JSONResponse(content=pack.pack_json)
+    finally:
+        db.close()
 
 
 @app.get("/download/report/{filename}")
@@ -1631,7 +1710,6 @@ def download_report(
         media_type="text/markdown",
         filename=filename,
     )
-
 
 
 @app.get("/public/{tenant_code}/articles/{slug}", response_class=HTMLResponse)
@@ -1685,7 +1763,6 @@ def get_public_article(
         return HTMLResponse(content=html, status_code=200)
     finally:
         db.close()
-
 
 
 @app.get("/products/{product_id}/articles", response_model=List[ArticleOut])
@@ -1742,7 +1819,6 @@ def list_product_articles(
             )
         )
     return results
-
 
 
 @app.post("/products/{product_id}/articles/generate", response_model=List[ArticleOut])
@@ -1859,7 +1935,6 @@ async def generate_product_articles(
 
     db.commit()
     return generated_articles
-
 
 
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
