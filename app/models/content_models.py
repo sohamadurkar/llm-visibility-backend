@@ -40,6 +40,10 @@ class ContentArticle(Base):
     # Angle key, e.g. "fit_comfort", "occasion", "budget_value", ...
     angle_key = Column(String, nullable=False, index=True)
 
+    # Product-specific human-readable angle label, e.g.
+    # "Supportive heels for all-day weddings"
+    angle_label = Column(String, nullable=True)
+
     # Human-readable title, e.g. "Fit & Comfort Guide for Velvet Mary Jane Pumps"
     title = Column(String, nullable=False)
 

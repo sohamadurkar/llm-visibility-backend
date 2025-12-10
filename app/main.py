@@ -60,6 +60,7 @@ from app.services.batch_competitor_report import (
 from app.services.content_generator import (
     ARTICLE_ANGLES,
     generate_article_html_for_angle,
+    generate_dynamic_angle_labels_for_product,  # NEW
 )
 
 load_dotenv()
@@ -426,7 +427,7 @@ class ArticleOut(BaseModel):
 class GenerateArticlesRequest(BaseModel):
     """
     Optional subset of angles to regenerate.
-    If omitted, we generate all 10 default angles.
+    If omitted, we generate all 10 canonical angles.
     """
     angles: Optional[List[str]] = None
     model: Optional[str] = DEFAULT_REPORT_MODEL
@@ -1797,7 +1798,11 @@ def list_product_articles(
 
     results: List[ArticleOut] = []
     for a in articles:
-        angle_label = ARTICLE_ANGLES.get(a.angle_key, a.angle_key)
+        # Prefer the stored dynamic angle_label, fallback to canonical / key
+        angle_label = (
+            a.angle_label
+            or ARTICLE_ANGLES.get(a.angle_key, a.angle_key)
+        )
 
         public_url = (
             f"{base_url}/public/{tenant_code_for_path}/articles/{a.slug}"
@@ -1836,9 +1841,9 @@ async def generate_product_articles(
     parsed = urlparse(product.url)
     domain = parsed.netloc
 
-    # Determine which angles to generate
+    # Determine which canonical angles to generate
     if payload.angles:
-        angle_keys = []
+        angle_keys: List[str] = []
         for key in payload.angles:
             if key not in ARTICLE_ANGLES:
                 raise HTTPException(
@@ -1858,6 +1863,16 @@ async def generate_product_articles(
         # If snapshot fails, we still generate more generic content
         page_snapshot = None
 
+    # 🔹 Ask LLM for product-specific labels for all 10 canonical angles
+    # (or at least the ones we'll use; we still call once and then subset)
+    dynamic_labels = generate_dynamic_angle_labels_for_product(
+        product_title=product.title or product.url,
+        product_url=product.url,
+        domain=domain,
+        page_snapshot=page_snapshot,
+        model=payload.model,
+    )
+
     generated_articles: List[ArticleOut] = []
 
     # 🔹 Figure out tenant code + base URL to build public_url
@@ -1873,7 +1888,8 @@ async def generate_product_articles(
     base_url = str(request.base_url).rstrip("/")
 
     for angle_key in angle_keys:
-        angle_label = ARTICLE_ANGLES[angle_key]
+        # Use dynamic per-product label if available; fall back to canonical
+        angle_label = dynamic_labels.get(angle_key) or ARTICLE_ANGLES[angle_key]
 
         article_data = generate_article_html_for_angle(
             product_title=product.title or product.url,
@@ -1905,6 +1921,7 @@ async def generate_product_articles(
             )
             db.add(article)
 
+        article.angle_label = angle_label  # 🔹 store dynamic label
         article.title = article_data["title"]
         article.meta_description = article_data.get("meta_description") or None
         article.content_html = article_data["content_html"]

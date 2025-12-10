@@ -18,19 +18,146 @@ def _ensure_api_key():
         raise RuntimeError("OPENAI_API_KEY not set in environment")
 
 
-# Canonical angle keys + human labels
+# Canonical angle keys + default/fallback human labels.
+# Keys are aligned with the frontend ContentAngleKey union.
 ARTICLE_ANGLES: Dict[str, str] = {
     "fit_comfort": "Fit & Comfort",
-    "occasion": "Occasion-specific",
+    "occasion_specific": "Occasion-specific",
     "budget_value": "Budget & Value",
     "trend_style": "Trend & Style",
-    "alternatives": "Alternatives & Similar Products",
+    "alternatives_similar": "Alternatives & Similar Products",
     "use_case": "Use-case & Scenario",
     "materials_durability": "Materials & Durability",
     "buying_guide": "Buying Guide",
     "faq": "FAQ",
     "care_maintenance": "Care & Maintenance",
 }
+
+
+def generate_dynamic_angle_labels_for_product(
+    *,
+    product_title: str,
+    product_url: str,
+    domain: str,
+    page_snapshot: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Ask the LLM to create product-specific angle labels for all 10 canonical
+    angle keys.
+
+    Returns a dict:
+        {
+          "fit_comfort": "Supportive heels for all-day weddings",
+          "occasion_specific": "Wedding-guest and party outfits",
+          ...
+        }
+
+    If anything goes wrong (API error / JSON parse), falls back to ARTICLE_ANGLES.
+    """
+    _ensure_api_key()
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    model_to_use = model or DEFAULT_REPORT_MODEL
+
+    snapshot_json = ""
+    if page_snapshot:
+        # Keep snapshot bounded so we don't blow token limits
+        raw = json.dumps(page_snapshot, ensure_ascii=False)
+        snapshot_json = raw[:7000]
+
+    # Build a description of the canonical buckets so the model
+    # knows what each key is meant to capture.
+    canonical_description = """
+We use 10 canonical angle keys to describe different buying and search intents:
+
+- fit_comfort: comfort, fit, support, sizing, all-day wear.
+- occasion_specific: specific events or contexts (weddings, office, travel, school, etc.).
+- budget_value: price, affordability, value for money, deals.
+- trend_style: fashion, style, trendiness, looks, aesthetic.
+- alternatives_similar: alternatives, similar products, comparisons, "something like this".
+- use_case: concrete scenarios and jobs-to-be-done (walking, running, standing all day, commuting, etc.).
+- materials_durability: materials, build quality, durability, sustainability.
+- buying_guide: how to choose, decision criteria, what to look for before buying.
+- faq: frequently asked questions buyers have about this product.
+- care_maintenance: cleaning, storage, care, how to keep it in good condition over time.
+""".strip()
+
+    system_msg = (
+        "You are an expert ecommerce content strategist. "
+        "For a given product page, you propose short, product-specific content angles "
+        "that could each be the focus of a long-form article. "
+        "You respond ONLY in strict JSON."
+    )
+
+    user_msg = f"""
+We are working on long-form content for one specific product page.
+
+Product:
+- Title: {product_title}
+- URL: {product_url}
+- Domain: {domain}
+
+{canonical_description}
+
+TASK:
+For EACH of the 10 angle keys, propose ONE short, product-specific label that:
+- clearly describes how we will frame this product for that angle,
+- is human-readable and specific (not generic like "Fit & Comfort"),
+- is at most 80 characters,
+- is suitable as a section heading in a content hub.
+
+If page snapshot data is provided, use it to make the labels grounded in the real page:
+
+Page snapshot (may be truncated JSON):
+{snapshot_json or "(no snapshot available)"}
+
+OUTPUT FORMAT (strict JSON, no extra text, no comments):
+
+{{
+  "fit_comfort": "…",
+  "occasion_specific": "…",
+  "budget_value": "…",
+  "trend_style": "…",
+  "alternatives_similar": "…",
+  "use_case": "…",
+  "materials_durability": "…",
+  "buying_guide": "…",
+  "faq": "…",
+  "care_maintenance": "…"
+}}
+""".strip()
+
+    try:
+        completion = client.chat.completions.create(
+            model=model_to_use,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.4,
+        )
+
+        raw = completion.choices[0].message.content or ""
+        data = json.loads(raw)
+
+        result: Dict[str, str] = {}
+        for key, default_label in ARTICLE_ANGLES.items():
+            val = data.get(key, "").strip() if isinstance(data, dict) else ""
+            if not isinstance(val, str) or not val:
+                # Fallback to generic label
+                result[key] = default_label
+            else:
+                # Ensure it isn't absurdly long
+                if len(val) > 120:
+                    val = val[:117].rstrip() + "..."
+                result[key] = val
+
+        return result
+
+    except Exception:
+        # On any error, just return the generic defaults
+        return dict(ARTICLE_ANGLES)
 
 
 def generate_article_html_for_angle(
@@ -45,6 +172,10 @@ def generate_article_html_for_angle(
 ) -> Dict[str, str]:
     """
     Generate a structured HTML article for a specific product + angle.
+
+    `angle_key` should be one of the canonical keys (fit_comfort, occasion_specific, ...).
+    `angle_label` is the product-specific, human-facing label for this article
+    (e.g. "Supportive heels for all-day weddings").
 
     Returns:
       {
@@ -79,7 +210,8 @@ Product:
 - URL: {product_url}
 - Domain: {domain}
 
-Angle to focus on: {angle_label}
+Angle key: {angle_key}
+Angle to focus on (human label): {angle_label}
 
 If page snapshot data is provided, use it to stay grounded in the actual content:
 
@@ -124,7 +256,7 @@ CONTENT REQUIREMENTS:
    -->
 
 Return ONLY the HTML fragment (the comment + <article>...</article>), no markdown, no extra explanation.
-"""
+""".strip()
 
     completion = client.chat.completions.create(
         model=model_to_use,
