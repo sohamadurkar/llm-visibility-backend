@@ -2,6 +2,7 @@ import os
 import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import uuid  # NEW
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -181,6 +182,140 @@ ABSOLUTE BEHAVIOURAL RULES
     return cleaned[:num_prompts]
 
 
+def _generate_persona_prompts_with_llm(
+    product_title: str,
+    product_url: str,
+    persona: str,
+    category: Optional[str],
+    num_prompts: int = 50,
+) -> List[str]:
+    """
+    Uses OpenAI to generate a list of high-intent, CUSTOMER-LIKE shopping prompts
+    for a product/category, tailored to a specific buyer persona.
+    """
+    _ensure_api_key()
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    system_msg = (
+        "You are an expert in real-world e-commerce search behaviour. "
+        "You generate short, natural-language BUYING QUERIES that real shoppers would ask an AI assistant. "
+        "You NEVER write marketing copy, lore, story references, or themed descriptions. "
+        "You ONLY write what a buyer would actually type or say when trying to find products to purchase."
+    )
+
+    user_msg = f"""
+You must generate {num_prompts} DIVERSE, HIGH-INTENT shopping prompts for this product and buyer persona.
+
+PRODUCT CONTEXT (for your understanding only):
+- Internal product title: {product_title}
+- Product page URL: {product_url}
+- Product/category (for context only): {category or "unknown"}
+
+BUYER PERSONA (write prompts in the voice and intent of this persona):
+\"\"\"{persona}\"\"\"
+
+The user does NOT know the internal title, brand, or URL. They are just a normal shopper matching this persona.
+
+========================
+ABSOLUTE BEHAVIOURAL RULES
+========================
+
+1) REAL BUYER INTENT ONLY (not research)
+   - Every prompt must reflect this persona being READY TO BUY or very close:
+     - Use patterns like: "buy", "where can I find", "best X to buy", "which X should I get",
+       "options under £X", "recommend", "show me", "good value", "with fast delivery", etc.
+   - No purely informational or educational questions.
+   - The persona clearly expects concrete product suggestions they could actually purchase.
+
+2) PROMPT STYLE = HOW THIS PERSONA SEARCHES
+   - Each prompt must be:
+     - 1 sentence (max 2 if absolutely needed),
+     - Short and to the point (roughly 8–25 words),
+     - Written in simple, natural language.
+   - You may reflect persona-specific constraints: budget, family situation, use-case, style, etc.
+   - Do NOT explain backstory, meaning, inspiration, themes, or lore.
+   - Do NOT reference any “famous”, “iconic”, or “classic” songs, movies, memes, stories, art, characters, or rivalries.
+   - Do NOT say things like “that famous X”, “that iconic Y”, “that classic duet”, “that viral meme”, etc.
+   - The product_title and URL are ONLY for you to infer generic product type, features, use-cases, etc.
+     You MUST NOT reuse phrases, names, or references from them.
+
+3) COVER KEY BUYER MODES ACROSS THE WHOLE SET
+   Spread the prompts so that, across the list, you naturally cover:
+
+   (a) Product discovery (buy mode)
+   (b) Close-alternative search
+   (c) Price / budget-led buying
+   (d) Occasion / use-case driven buying
+   (e) Fit / comfort / practicality
+   (f) Trend / popularity / best-rated
+   (g) Channel preference (generic "online", "UK websites", etc.)
+
+4) STRICT BRAND, STORE, DOMAIN & TITLE NEUTRALITY
+   - NEVER mention brand / store / domain / URL.
+   - NEVER paraphrase the product title.
+   - Assume the persona has NEVER heard of this specific product/brand.
+
+5) WHAT TO AVOID (VERY IMPORTANT)
+   - No lore, story, rivalry, character or plot references.
+   - No lyrics, quotes, or indirect references to songs, shows, movies, or memes.
+   - No fan / collector style language.
+   - No long descriptive or themed language.
+
+6) UK CONTEXT (default)
+   - Use £ for prices.
+   - Assume the persona is in the UK unless the category clearly implies otherwise.
+
+7) OUTPUT FORMAT (MUST FOLLOW EXACTLY)
+   - Return STRICTLY valid JSON with this exact structure:
+
+   {{
+     "prompts": [
+       "prompt 1",
+       "prompt 2",
+       "prompt 3"
+     ]
+   }}
+
+   - No markdown, no explanations, no comments, no extra keys.
+   - Return exactly {num_prompts} prompts if possible, but at least 30 minimum.
+"""
+
+    completion = client.chat.completions.create(
+        model=DEFAULT_PROMPT_PACK_MODEL,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.5,
+    )
+
+    content = completion.choices[0].message.content or ""
+
+    try:
+        data = json.loads(content)
+        prompts = data.get("prompts", [])
+    except Exception:
+        # fallback: split by lines if model didn't return JSON
+        prompts = [
+            line.strip()
+            for line in content.split("\n")
+            if line.strip()
+        ]
+
+    cleaned: List[str] = []
+    for p in prompts:
+        if isinstance(p, str):
+            s = p.strip()
+            if s:
+                cleaned.append(s)
+
+    if not cleaned:
+        raise RuntimeError("LLM returned no prompts for persona pack")
+
+    return cleaned[:num_prompts]
+
+
 def _slugify(text: str, max_length: int = 40) -> str:
     text = text.lower()
     slug = []
@@ -237,6 +372,52 @@ def generate_prompt_pack_for_product(
         "category": category or "auto_generated_high_intent",
         "language": "en",
         "source": "auto_generated_high_intent",
+        "prompts": prompts,
+    }
+    return pack
+
+
+def generate_persona_prompt_pack_for_product(
+    product_id: int,
+    product_title: str,
+    product_url: str,
+    persona: str,
+    category: Optional[str] = None,
+    num_prompts: int = 50,
+    pack_id: Optional[str] = None,
+    name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Returns a dict for a persona-based prompt pack.
+
+    - Prompts are generated in the voice and intent of the given persona.
+    - Same high-purchase-intent rules, but persona-specific constraints are allowed.
+    """
+    prompts = _generate_persona_prompts_with_llm(
+      product_title=product_title,
+      product_url=product_url,
+      persona=persona,
+      category=category,
+      num_prompts=num_prompts,
+    )
+
+    if pack_id:
+        base_id = pack_id
+    else:
+        short = uuid.uuid4().hex[:8]
+        base_id = f"persona_{product_id}_{short}"
+
+    default_name = f"Persona pack – {persona[:40]}".strip()
+    pack_name = name or default_name
+
+    pack: Dict[str, Any] = {
+        "id": base_id,
+        "name": pack_name,
+        "category": category or "persona_high_intent",
+        "language": "en",
+        "source": "persona_high_intent",
+        "product_id": product_id,
+        "persona": persona,
         "prompts": prompts,
     }
     return pack

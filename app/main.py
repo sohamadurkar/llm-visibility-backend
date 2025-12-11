@@ -32,6 +32,7 @@ from app.services.llm_checker import (
 from app.services.prompt_generator import (
     generate_prompt_pack_for_product,
     save_prompt_pack_to_file,
+    generate_persona_prompt_pack_for_product,  # NEW
 )
 from app.services.google_prompt_generator import (
     generate_google_prompt_pack_for_product,
@@ -403,6 +404,23 @@ class GenerateGooglePromptPackRequest(BaseModel):
 
 
 class GenerateGooglePromptPackResponse(BaseModel):
+    pack_id: str
+    num_prompts: int
+    file_path: str
+    download_url: str
+
+
+# NEW: Persona prompt pack models
+class GeneratePersonaPromptPackRequest(BaseModel):
+    product_id: int
+    persona: str
+    num_prompts: int = 50
+    pack_id: Optional[str] = None
+    name: Optional[str] = None
+    category: Optional[str] = None
+
+
+class GeneratePersonaPromptPackResponse(BaseModel):
     pack_id: str
     num_prompts: int
     file_path: str
@@ -1390,6 +1408,104 @@ def generate_prompt_pack(
     # --- End sync ---
 
     return GeneratePromptPackResponse(
+        pack_id=pack["id"],
+        num_prompts=len(pack.get("prompts", [])),
+        file_path=file_path,
+        download_url=download_url,
+    )
+
+
+# NEW: Persona prompt pack endpoint
+@app.post("/generate-persona-prompt-pack", response_model=GeneratePersonaPromptPackResponse)
+def generate_persona_prompt_pack(
+    payload: GeneratePersonaPromptPackRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Source C: Persona-based high-intent prompts.
+
+    - Requires a free-text persona description (e.g. "busy parent in London on a tight budget").
+    - Prompts are generated in the voice and constraints of this persona.
+    """
+    product = (
+        db.query(Product)
+        .filter(Product.id == payload.product_id)
+        .one_or_none()
+    )
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    persona = (payload.persona or "").strip()
+    if not persona:
+        raise HTTPException(status_code=400, detail="Persona description is required")
+
+    inferred_category = payload.category or None
+
+    pack = generate_persona_prompt_pack_for_product(
+        product_id=product.id,
+        product_title=product.title or product.url,
+        product_url=product.url,
+        persona=persona,
+        category=inferred_category,
+        num_prompts=payload.num_prompts,
+        pack_id=payload.pack_id,
+        name=payload.name,
+    )
+
+    # Save JSON file
+    file_path = save_prompt_pack_to_file(pack)
+    base_url = str(request.base_url).rstrip("/")
+    download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
+
+    # --- Sync DB PromptPack + Prompt records ---
+    pack_key = pack["id"]
+    db_pack = (
+        db.query(PromptPack)
+        .filter(PromptPack.pack_key == pack_key)
+        .one_or_none()
+    )
+    if not db_pack:
+        db_pack = PromptPack(
+            pack_key=pack_key,
+            name=pack.get("name"),
+            category=pack.get("category"),
+            source=pack.get("source") or "persona_high_intent",
+            language=pack.get("language", "en"),
+            product_id=product.id,
+            pack_json=pack,
+        )
+        db.add(db_pack)
+        db.flush()
+    else:
+        # If re-generating, update metadata + JSON
+        db_pack.name = pack.get("name")
+        db_pack.category = pack.get("category")
+        db_pack.source = pack.get("source") or db_pack.source
+        db_pack.language = pack.get("language", "en")
+        db_pack.product_id = product.id
+        db_pack.pack_json = pack
+
+    # Clear existing prompts for this pack (if re-generating)
+    db.query(Prompt).filter(Prompt.pack_id == db_pack.id).delete()
+
+    prompts = pack.get("prompts", [])
+    for idx, text in enumerate(prompts):
+        behaviour = classify_prompt_behaviour(text)
+        db.add(
+            Prompt(
+                pack_id=db_pack.id,
+                index=idx,
+                text=text,
+                behaviour=behaviour,
+            )
+        )
+
+    db.commit()
+    # --- End sync ---
+
+    return GeneratePersonaPromptPackResponse(
         pack_id=pack["id"],
         num_prompts=len(pack.get("prompts", [])),
         file_path=file_path,
