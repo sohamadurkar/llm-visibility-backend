@@ -204,6 +204,9 @@ def _normalize_schema_name(raw: str) -> str:
     if not raw:
         return "public"
 
+    if raw == "public":
+        return "public"
+
     if raw.startswith("tenant_"):
         schema = raw
     else:
@@ -1796,22 +1799,20 @@ async def batch_competitor_report(
 
 
 @app.get("/download/prompt-pack/{pack_id}")
-def download_prompt_pack(
-    pack_id: str,
-):
+def download_prompt_pack(pack_id: str, request: Request):
     """
     Download a prompt pack JSON file by pack_id.
 
     Behaviour:
     - Try to serve the JSON file from disk (legacy behaviour).
-    - If it's missing, fall back to the DB-stored pack_json.
+    - If it's missing, fall back to the DB-stored pack_json (tenant-aware).
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
 
+    # 1) Try file first (legacy)
     fname = f"{pack_id}.json"
     fpath = os.path.join(PROMPT_PACKS_DIR, fname)
-
     if os.path.isfile(fpath):
         return FileResponse(
             path=fpath,
@@ -1819,9 +1820,14 @@ def download_prompt_pack(
             filename=fname,
         )
 
-    # Fallback: serve from DB
+    # 2) Tenant-aware DB fallback
+    tenant_schema = get_tenant_schema(request)
+    _ensure_tenant_schema(tenant_schema)
+
     db = SessionLocal()
     try:
+        db.execute(text(f'SET search_path TO "{tenant_schema}"'))
+
         pack = (
             db.query(PromptPack)
             .filter(PromptPack.pack_key == pack_id)
