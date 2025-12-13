@@ -204,6 +204,9 @@ def _normalize_schema_name(raw: str) -> str:
     if not raw:
         return "public"
 
+    if raw == "public":
+        return "public"
+
     if raw.startswith("tenant_"):
         schema = raw
     else:
@@ -253,6 +256,21 @@ def get_tenant_schema(request: Request) -> str:
     """
     raw_tenant = request.headers.get(TENANT_HEADER)
     return _normalize_schema_name(raw_tenant or "")
+
+
+# ✅ NEW: helper for URL paths (tenant code, not schema)
+def tenant_code_for_path_from_request(request: Request) -> str:
+    """
+    Returns a tenant code suitable for putting in URL paths.
+    - If header missing -> "public"
+    - If header is "tenant_xxx" -> "xxx"
+    - Else -> header value (lowercased)
+    """
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip().lower() or "public"
+    if tenant_code.startswith("tenant_"):
+        return tenant_code[len("tenant_"):]
+    return tenant_code
 
 
 # --- DB Session Dependency (now tenant-aware) ---
@@ -1069,7 +1087,7 @@ def run_llm_check(
         domain=domain,
         model=payload.model,
     )
-    
+
     product_id = payload.product_id
 
     row = LLMTest(
@@ -1359,7 +1377,8 @@ def generate_prompt_pack(
     # Save JSON file
     file_path = save_prompt_pack_to_file(pack)
     base_url = str(request.base_url).rstrip("/")
-    download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
+    tenant_code_for_path = tenant_code_for_path_from_request(request)
+    download_url = f"{base_url}/download/{tenant_code_for_path}/prompt-pack/{pack['id']}"
 
     # --- Sync DB PromptPack + Prompt records ---
     pack_key = pack["id"]
@@ -1457,7 +1476,8 @@ def generate_persona_prompt_pack(
     # Save JSON file
     file_path = save_prompt_pack_to_file(pack)
     base_url = str(request.base_url).rstrip("/")
-    download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
+    tenant_code_for_path = tenant_code_for_path_from_request(request)
+    download_url = f"{base_url}/download/{tenant_code_for_path}/prompt-pack/{pack['id']}"
 
     # --- Sync DB PromptPack + Prompt records ---
     pack_key = pack["id"]
@@ -1547,7 +1567,8 @@ def generate_google_prompt_pack(
     # Save JSON file
     file_path = save_prompt_pack_to_file(pack)
     base_url = str(request.base_url).rstrip("/")
-    download_url = f"{base_url}/download/prompt-pack/{pack['id']}"
+    tenant_code_for_path = tenant_code_for_path_from_request(request)
+    download_url = f"{base_url}/download/{tenant_code_for_path}/prompt-pack/{pack['id']}"
 
     # --- Sync DB PromptPack + Prompt records ---
     pack_key = pack["id"]
@@ -1795,23 +1816,18 @@ async def batch_competitor_report(
     )
 
 
-@app.get("/download/prompt-pack/{pack_id}")
-def download_prompt_pack(
-    pack_id: str,
-):
+# ✅ NEW: Tenant-aware prompt pack download (no headers required)
+@app.get("/download/{tenant_code}/prompt-pack/{pack_id}")
+def download_prompt_pack_for_tenant(tenant_code: str, pack_id: str):
     """
-    Download a prompt pack JSON file by pack_id.
-
-    Behaviour:
-    - Try to serve the JSON file from disk (legacy behaviour).
-    - If it's missing, fall back to the DB-stored pack_json.
+    Tenant-aware download URL that works with plain <a href> clicks.
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
 
+    # 1) Try file first (legacy)
     fname = f"{pack_id}.json"
     fpath = os.path.join(PROMPT_PACKS_DIR, fname)
-
     if os.path.isfile(fpath):
         return FileResponse(
             path=fpath,
@@ -1819,9 +1835,57 @@ def download_prompt_pack(
             filename=fname,
         )
 
-    # Fallback: serve from DB
+    # 2) DB fallback in correct tenant schema
+    schema = _normalize_schema_name(tenant_code)  # "test_client" -> "tenant_test_client"
+    _ensure_tenant_schema(schema)
+
     db = SessionLocal()
     try:
+        db.execute(text(f'SET search_path TO "{schema}"'))
+
+        pack = (
+            db.query(PromptPack)
+            .filter(PromptPack.pack_key == pack_id)
+            .one_or_none()
+        )
+        if not pack or not pack.pack_json:
+            raise HTTPException(status_code=404, detail="Prompt pack not found")
+
+        return JSONResponse(content=pack.pack_json)
+    finally:
+        db.close()
+
+
+@app.get("/download/prompt-pack/{pack_id}")
+def download_prompt_pack(pack_id: str, request: Request):
+    """
+    Download a prompt pack JSON file by pack_id.
+
+    Behaviour:
+    - Try to serve the JSON file from disk (legacy behaviour).
+    - If it's missing, fall back to the DB-stored pack_json (tenant-aware).
+    """
+    if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
+        raise HTTPException(status_code=400, detail="Invalid pack_id")
+
+    # 1) Try file first (legacy)
+    fname = f"{pack_id}.json"
+    fpath = os.path.join(PROMPT_PACKS_DIR, fname)
+    if os.path.isfile(fpath):
+        return FileResponse(
+            path=fpath,
+            media_type="application/json",
+            filename=fname,
+        )
+
+    # 2) Tenant-aware DB fallback (requires header)
+    tenant_schema = get_tenant_schema(request)
+    _ensure_tenant_schema(tenant_schema)
+
+    db = SessionLocal()
+    try:
+        db.execute(text(f'SET search_path TO "{tenant_schema}"'))
+
         pack = (
             db.query(PromptPack)
             .filter(PromptPack.pack_key == pack_id)

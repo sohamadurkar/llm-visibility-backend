@@ -13,6 +13,8 @@ import json
 import re
 import uuid  # NEW
 
+import threading
+
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -67,6 +69,19 @@ from app.services.content_generator import (
 load_dotenv()
 
 app = FastAPI(title="LLM Visibility API", version="0.7.0")
+
+# ------------------------------------------------------------------
+# Tenant schema ensure cache (process-wide)
+# ------------------------------------------------------------------
+_ENSURED_SCHEMAS: set[str] = set()
+_ENSURE_LOCK = threading.Lock()
+
+# ✅ NEW: safe identifier quoting helper (schema name)
+def _quote_ident(name: str) -> str:
+    # basic safety check – only allow letters, digits, underscore
+    if not re.fullmatch(r"[a-zA-Z0-9_]+", name or ""):
+        raise HTTPException(status_code=400, detail="Invalid tenant name")
+    return f'"{name}"'
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
@@ -227,26 +242,40 @@ def _ensure_tenant_schema(schema: str):
     - This NO LONGER creates schemas or tables.
     - New schemas are provisioned ONLY via `provision_new_tenant`
       (used by /auth/register-client).
+
+    ✅ UPDATED:
+    - Uses process-wide cache to avoid hitting information_schema on every request.
     """
     if schema == "public":
         # public gets its tables created at startup
         return
 
-    with engine.connect() as conn:
-        exists = conn.execute(
-            text(
-                "SELECT 1 FROM information_schema.schemata "
-                "WHERE schema_name = :name"
-            ),
-            {"name": schema},
-        ).scalar()
+    # Fast path: already verified in this process
+    if schema in _ENSURED_SCHEMAS:
+        return
 
-    if not exists:
-        # Unknown / unprovisioned tenant
-        raise HTTPException(
-            status_code=404,
-            detail="Unknown workspace / tenant. Please check your tenant code.",
-        )
+    with _ENSURE_LOCK:
+        if schema in _ENSURED_SCHEMAS:
+            return
+
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.schemata "
+                    "WHERE schema_name = :name"
+                ),
+                {"name": schema},
+            ).scalar()
+
+        if not exists:
+            # Unknown / unprovisioned tenant
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown workspace / tenant. Please check your tenant code.",
+            )
+
+        # Cache as verified
+        _ENSURED_SCHEMAS.add(schema)
 
 
 def get_tenant_schema(request: Request) -> str:
@@ -286,11 +315,12 @@ def get_db(request: Request):
     try:
         schema = get_tenant_schema(request)
 
-        # Ensure the schema already exists (no auto-creation here)
+        # Ensure the schema already exists (cached; no auto-creation here)
         _ensure_tenant_schema(schema)
 
-        # Set search_path on this session so all queries are schema-scoped
-        db.execute(text(f'SET search_path TO "{schema}"'))
+        # ✅ UPDATED: safe schema quoting + include public fallback
+        qschema = _quote_ident(schema)
+        db.execute(text(f"SET search_path TO {qschema}, public"))
 
         # 🔹 Lightweight migration: make sure angle_label exists in this schema too
         try:
@@ -691,7 +721,8 @@ def _run_llm_batch_background(
     db = SessionLocal()
     try:
         # Ensure we are operating inside the correct tenant schema
-        db.execute(text(f'SET search_path TO "{tenant_schema}"'))
+        qschema = _quote_ident(tenant_schema)
+        db.execute(text(f"SET search_path TO {qschema}, public"))
 
         product = (
             db.query(Product)
@@ -1841,7 +1872,8 @@ def download_prompt_pack_for_tenant(tenant_code: str, pack_id: str):
 
     db = SessionLocal()
     try:
-        db.execute(text(f'SET search_path TO "{schema}"'))
+        qschema = _quote_ident(schema)
+        db.execute(text(f"SET search_path TO {qschema}, public"))
 
         pack = (
             db.query(PromptPack)
@@ -1884,7 +1916,8 @@ def download_prompt_pack(pack_id: str, request: Request):
 
     db = SessionLocal()
     try:
-        db.execute(text(f'SET search_path TO "{tenant_schema}"'))
+        qschema = _quote_ident(tenant_schema)
+        db.execute(text(f"SET search_path TO {qschema}, public"))
 
         pack = (
             db.query(PromptPack)
@@ -1942,7 +1975,8 @@ def get_public_article(
 
     db = SessionLocal()
     try:
-        db.execute(text(f'SET search_path TO "{schema}"'))
+        qschema = _quote_ident(schema)
+        db.execute(text(f"SET search_path TO {qschema}, public"))
 
         article = (
             db.query(ContentArticle)
