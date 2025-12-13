@@ -195,13 +195,17 @@ def _normalize_schema_name(raw: str) -> str:
     """
     Turn a client identifier into a safe Postgres schema name.
     Examples:
-      "demo_client"     -> "tenant_demo_client"
-      "tenant_client_b" -> "tenant_client_b" (kept as is)
-
-    This is used for request-time routing via the X-Tenant header.
+      ""               -> "public"
+      "public"         -> "public"
+      "demo_client"    -> "tenant_demo_client"
+      "tenant_client_b"-> "tenant_client_b"
     """
     raw = (raw or "").strip().lower()
     if not raw:
+        return "public"
+
+    # ✅ IMPORTANT: treat literal "public" as the real public schema
+    if raw == "public":
         return "public"
 
     if raw.startswith("tenant_"):
@@ -209,7 +213,6 @@ def _normalize_schema_name(raw: str) -> str:
     else:
         schema = f"tenant_{raw}"
 
-    # basic safety check – only allow letters, digits, underscore
     if not re.fullmatch(r"[a-zA-Z0-9_]+", schema):
         raise HTTPException(status_code=400, detail="Invalid tenant name")
 
@@ -1334,7 +1337,7 @@ def run_llm_batch_async(
 def generate_prompt_pack(
     payload: GeneratePromptPackRequest,
     db: Session = Depends(get_db),
-    request: Request = None,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -1420,7 +1423,7 @@ def generate_prompt_pack(
 def generate_persona_prompt_pack(
     payload: GeneratePersonaPromptPackRequest,
     db: Session = Depends(get_db),
-    request: Request = None,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -1517,7 +1520,7 @@ def generate_persona_prompt_pack(
 def generate_google_prompt_pack(
     payload: GenerateGooglePromptPackRequest,
     db: Session = Depends(get_db),
-    request: Request = None,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -1798,13 +1801,14 @@ async def batch_competitor_report(
 @app.get("/download/prompt-pack/{pack_id}")
 def download_prompt_pack(
     pack_id: str,
+    request: Request,
 ):
     """
     Download a prompt pack JSON file by pack_id.
 
     Behaviour:
-    - Try to serve the JSON file from disk (legacy behaviour).
-    - If it's missing, fall back to the DB-stored pack_json.
+    - Try disk first (legacy).
+    - If missing, load from DB in the CURRENT TENANT schema (via X-Tenant header).
     """
     if ".." in pack_id or "/" in pack_id or "\\" in pack_id:
         raise HTTPException(status_code=400, detail="Invalid pack_id")
@@ -1812,6 +1816,7 @@ def download_prompt_pack(
     fname = f"{pack_id}.json"
     fpath = os.path.join(PROMPT_PACKS_DIR, fname)
 
+    # 1) Legacy disk file
     if os.path.isfile(fpath):
         return FileResponse(
             path=fpath,
@@ -1819,9 +1824,14 @@ def download_prompt_pack(
             filename=fname,
         )
 
-    # Fallback: serve from DB
+    # 2) Tenant-aware DB fallback
+    tenant_schema = get_tenant_schema(request)
+    _ensure_tenant_schema(tenant_schema)
+
     db = SessionLocal()
     try:
+        db.execute(text(f'SET search_path TO "{tenant_schema}"'))
+
         pack = (
             db.query(PromptPack)
             .filter(PromptPack.pack_key == pack_id)
