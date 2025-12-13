@@ -157,6 +157,7 @@ def provision_new_tenant(
     - schema: tenant_<code>
     - all tables in that schema (using Base.metadata)
     - an admin user in that schema
+    - ✅ runs one-time tenant migration(s) (Option A)
 
     Returns the schema name.
     """
@@ -191,6 +192,17 @@ def provision_new_tenant(
 
         # Create all tables defined on Base in this schema
         Base.metadata.create_all(bind=conn)
+
+        # ✅ Option A: run tenant migration ONCE during provisioning
+        # Ensure angle_label exists in this tenant schema
+        conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS content_articles
+                ADD COLUMN IF NOT EXISTS angle_label VARCHAR
+                """
+            )
+        )
 
         # Insert the initial admin user into this tenant's users table
         conn.execute(
@@ -318,25 +330,15 @@ def get_db(request: Request):
         # Ensure the schema already exists (cached; no auto-creation here)
         _ensure_tenant_schema(schema)
 
-        # ✅ UPDATED: safe schema quoting + include public fallback
+        # ✅ safe schema quoting + include public fallback
         qschema = _quote_ident(schema)
         db.execute(text(f"SET search_path TO {qschema}, public"))
 
-        # 🔹 Lightweight migration: make sure angle_label exists in this schema too
-        try:
-            db.execute(
-                text(
-                    """
-                    ALTER TABLE IF EXISTS content_articles
-                    ADD COLUMN IF NOT EXISTS angle_label VARCHAR
-                    """
-                )
-            )
-        except Exception:
-            # Don't break requests if migration fails for some reason
-            pass
-
         yield db
+    except Exception:
+        # important to free the connection cleanly if an error happens mid-request
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -347,7 +349,7 @@ def on_startup():
     # Base public schema – useful for default/demo tenant
     Base.metadata.create_all(bind=engine)
 
-    # 🔹 Ensure new angle_label column exists on public.content_articles
+    # 🔹 Ensure angle_label column exists on public.content_articles
     from sqlalchemy import text as _text
     with engine.begin() as conn:
         conn.execute(
@@ -587,7 +589,6 @@ class ClientRegistrationResponse(BaseModel):
 
 # ----- Behaviour classifier for prompts -----
 
-
 def classify_prompt_behaviour(text: str) -> str:
     """
     Heuristic classifier that assigns a behaviour label to a prompt
@@ -674,7 +675,6 @@ def _article_slug(product_id: int, angle_key: str) -> str:
 
 
 # ----- Auth helpers (dependencies) -----
-
 
 def get_current_user(
     request: Request,
