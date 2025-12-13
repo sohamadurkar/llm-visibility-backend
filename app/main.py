@@ -1337,7 +1337,7 @@ def run_llm_batch_async(
 def generate_prompt_pack(
     payload: GeneratePromptPackRequest,
     db: Session = Depends(get_db),
-    request: Request,
+    request: Request = None,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -1423,7 +1423,7 @@ def generate_prompt_pack(
 def generate_persona_prompt_pack(
     payload: GeneratePersonaPromptPackRequest,
     db: Session = Depends(get_db),
-    request: Request,
+    request: Request = None,
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -1520,7 +1520,7 @@ def generate_persona_prompt_pack(
 def generate_google_prompt_pack(
     payload: GenerateGooglePromptPackRequest,
     db: Session = Depends(get_db),
-    request: Request,
+    request: Request = None,
     current_user: User = Depends(get_current_user),
 ):
     """
