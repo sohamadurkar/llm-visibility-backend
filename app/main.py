@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, HttpUrl, EmailStr
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, and_, func, case
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
