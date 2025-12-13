@@ -2187,14 +2187,10 @@ async def generate_product_articles(
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
 def prompt_stats(
     pack_id: str,
-    batch_id: Optional[str] = None,  # NEW
+    batch_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Returns per-prompt performance for a given pack_id (pack_key).
-    If batch_id is provided, stats are restricted to that batch only.
-    """
     db_pack = (
         db.query(PromptPack)
         .filter(PromptPack.pack_key == pack_id)
@@ -2203,31 +2199,42 @@ def prompt_stats(
     if not db_pack:
         raise HTTPException(status_code=404, detail="Prompt pack not found in DB")
 
-    prompts = (
-        db.query(Prompt)
+    # Build an OUTER JOIN so prompts with zero tests still return
+    join_cond = (LLMTest.prompt_id == Prompt.id)
+    if batch_id:
+        join_cond = and_(join_cond, LLMTest.batch_id == batch_id)
+
+    rows = (
+        db.query(
+            Prompt.id.label("prompt_id"),
+            Prompt.index.label("index"),
+            Prompt.text.label("text"),
+            func.count(LLMTest.id).label("total_runs"),
+            func.coalesce(
+                func.sum(
+                    case((LLMTest.appeared == True, 1), else_=0)
+                ),
+                0,
+            ).label("appeared_count"),
+        )
+        .outerjoin(LLMTest, join_cond)
         .filter(Prompt.pack_id == db_pack.id)
+        .group_by(Prompt.id, Prompt.index, Prompt.text)
         .order_by(Prompt.index)
         .all()
     )
 
     results: List[PromptPerformance] = []
-
-    for prompt in prompts:
-        q = db.query(LLMTest).filter(LLMTest.prompt_id == prompt.id)
-
-        if batch_id:
-            q = q.filter(LLMTest.batch_id == batch_id)
-
-        tests = q.all()
-        total_runs = len(tests)
-        appeared_count = sum(1 for t in tests if t.appeared)
+    for r in rows:
+        total_runs = int(r.total_runs or 0)
+        appeared_count = int(r.appeared_count or 0)
         visibility_score = (appeared_count / total_runs) if total_runs > 0 else 0.0
 
         results.append(
             PromptPerformance(
-                prompt_id=prompt.id,
-                index=prompt.index,
-                text=prompt.text,
+                prompt_id=r.prompt_id,
+                index=r.index,
+                text=r.text,
                 total_runs=total_runs,
                 appeared_count=appeared_count,
                 visibility_score=visibility_score,
