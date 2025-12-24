@@ -244,6 +244,39 @@ CONTENT REQUIREMENTS:
    - Mention relevant scenarios, fit, use-cases, and decision criteria.
    - Use natural language, not keyword stuffing.
 
+4.5) E-E-A-T RULES (CRITICAL — MUST FOLLOW)
+   The article must be written in a way that strengthens Experience, Expertise, Authoritativeness, and Trust.
+
+   (a) Experience
+       - Include a short “Practical considerations” or “What buyers often notice” subsection.
+       - Speak from general, non-personal experience (“many buyers find…”, “in practice…”) without claiming first-hand use.
+       - Never claim “we tested”, “I tried”, “our lab results”, or anything implying personal use unless the snapshot explicitly contains that evidence.
+
+   (b) Expertise
+       - Use accurate, domain-relevant guidance (sizing/fit considerations, materials, care, durability, buying criteria).
+       - Explain trade-offs and decision logic (e.g., what to prioritise and why).
+       - Avoid sweeping or unverifiable claims (“best”, “top quality”, “guaranteed”, “perfect for everyone”).
+
+   (c) Authoritativeness
+       - Do not invent credentials, awards, certifications, press mentions, or partnerships.
+       - If the snapshot includes real authority signals (certifications, standards, reviews schema, organisation details), you may reference them carefully and factually.
+       - If authority signals are missing, propose a “What to verify on the product page” checklist rather than making claims.
+
+   (d) Trust
+       - Do not invent prices, stock status, delivery promises, return policies, warranty terms, ingredients/specs, measurements, or review scores.
+       - If key details are unknown, say so plainly and suggest what the page should include (e.g., materials, dimensions, care instructions).
+       - Use cautious language (“may”, “often”, “typically”) when details are not confirmed by the snapshot.
+
+   (e) Transparency & AI disclosure (lightweight)
+       - Include a short disclaimer near the end inside the <article>:
+         “Information is based on the product page content available at the time of writing; confirm details on the retailer’s page.”
+       - Do NOT mention OpenAI, ChatGPT, or “AI-generated”. Keep it human-facing and trust-focused.
+
+   (f) Avoid “thin AI content” signals
+       - The article must be specific to THIS product URL, not generic.
+       - Reuse of boilerplate phrasing should be minimal; vary structure naturally.
+       - Include concrete, non-made-up decision criteria and FAQs tailored to the product type and snapshot.
+
 5) Also provide, at the very top as an HTML comment:
    - A suggested page title (<title> equivalent)
    - A one-sentence meta description

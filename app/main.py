@@ -314,6 +314,10 @@ def tenant_code_for_path_from_request(request: Request) -> str:
     return tenant_code
 
 
+def _public_article_url(base_url: str, tenant_code_for_path: str, slug: str) -> str:
+    return f"{base_url}/public/{tenant_code_for_path}/articles/{slug}"
+
+
 # --- DB Session Dependency (now tenant-aware) ---
 def get_db(request: Request):
     """
@@ -525,6 +529,36 @@ class GenerateArticlesRequest(BaseModel):
     """
     angles: Optional[List[str]] = None
     model: Optional[str] = DEFAULT_REPORT_MODEL
+
+
+class ArticleDetailOut(BaseModel):
+    id: int
+    product_id: int
+    angle_key: str
+    angle_label: str
+    title: str
+    slug: str
+    meta_description: Optional[str] = None
+    content_html: str
+    is_published: bool
+    public_url: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ArticleUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    meta_description: Optional[str] = None
+    content_html: Optional[str] = None
+
+
+class PublishActionResponse(BaseModel):
+    id: int
+    is_published: bool
+    public_url: str
 
 
 # ----- NEW: Batch competitor report models -----
@@ -2154,7 +2188,7 @@ async def generate_product_articles(
             title=article_data["title"],
             meta_description=article_data.get("meta_description") or None,
             content_html=article_data["content_html"],
-            is_published=True,
+            is_published=False,
         )
         db.add(article)
         db.flush()
@@ -2182,6 +2216,167 @@ async def generate_product_articles(
 
     db.commit()
     return generated_articles
+
+
+@app.get("/articles/{article_id}", response_model=ArticleDetailOut)
+def get_article(
+    article_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    article = db.query(ContentArticle).filter(ContentArticle.id == article_id).one_or_none()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip().lower() or "public"
+    if tenant_code.startswith("tenant_"):
+        tenant_code_for_path = tenant_code[len("tenant_"):]
+    else:
+        tenant_code_for_path = tenant_code
+
+    base_url = str(request.base_url).rstrip("/")
+    public_url = _public_article_url(base_url, tenant_code_for_path, article.slug)
+
+    angle_label = article.angle_label or ARTICLE_ANGLES.get(article.angle_key, article.angle_key)
+
+    return ArticleDetailOut(
+        id=article.id,
+        product_id=article.product_id,
+        angle_key=article.angle_key,
+        angle_label=angle_label,
+        title=article.title,
+        slug=article.slug,
+        meta_description=article.meta_description,
+        content_html=article.content_html,
+        is_published=article.is_published,
+        public_url=public_url,
+        created_at=article.created_at,
+        updated_at=article.updated_at,
+    )
+
+
+@app.patch("/articles/{article_id}", response_model=ArticleDetailOut)
+def update_article(
+    article_id: int,
+    payload: ArticleUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    article = db.query(ContentArticle).filter(ContentArticle.id == article_id).one_or_none()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    # Apply partial updates (draft editing)
+    if payload.title is not None:
+        article.title = payload.title.strip() or article.title
+
+    if payload.meta_description is not None:
+        # Allow clearing meta description by passing empty string
+        md = payload.meta_description.strip()
+        article.meta_description = md if md else None
+
+    if payload.content_html is not None:
+        html = payload.content_html.strip()
+        if not html:
+            raise HTTPException(status_code=400, detail="content_html cannot be empty")
+        article.content_html = html
+
+    db.commit()
+    db.refresh(article)
+
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip().lower() or "public"
+    if tenant_code.startswith("tenant_"):
+        tenant_code_for_path = tenant_code[len("tenant_"):]
+    else:
+        tenant_code_for_path = tenant_code
+
+    base_url = str(request.base_url).rstrip("/")
+    public_url = _public_article_url(base_url, tenant_code_for_path, article.slug)
+    angle_label = article.angle_label or ARTICLE_ANGLES.get(article.angle_key, article.angle_key)
+
+    return ArticleDetailOut(
+        id=article.id,
+        product_id=article.product_id,
+        angle_key=article.angle_key,
+        angle_label=angle_label,
+        title=article.title,
+        slug=article.slug,
+        meta_description=article.meta_description,
+        content_html=article.content_html,
+        is_published=article.is_published,
+        public_url=public_url,
+        created_at=article.created_at,
+        updated_at=article.updated_at,
+    )
+
+
+@app.post("/articles/{article_id}/publish", response_model=PublishActionResponse)
+def publish_article(
+    article_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    article = db.query(ContentArticle).filter(ContentArticle.id == article_id).one_or_none()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    article.is_published = True
+    db.commit()
+    db.refresh(article)
+
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip().lower() or "public"
+    if tenant_code.startswith("tenant_"):
+        tenant_code_for_path = tenant_code[len("tenant_"):]
+    else:
+        tenant_code_for_path = tenant_code
+
+    base_url = str(request.base_url).rstrip("/")
+    public_url = _public_article_url(base_url, tenant_code_for_path, article.slug)
+
+    return PublishActionResponse(
+        id=article.id,
+        is_published=article.is_published,
+        public_url=public_url,
+    )
+
+
+@app.post("/articles/{article_id}/unpublish", response_model=PublishActionResponse)
+def unpublish_article(
+    article_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    article = db.query(ContentArticle).filter(ContentArticle.id == article_id).one_or_none()
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    article.is_published = False
+    db.commit()
+    db.refresh(article)
+
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip().lower() or "public"
+    if tenant_code.startswith("tenant_"):
+        tenant_code_for_path = tenant_code[len("tenant_"):]
+    else:
+        tenant_code_for_path = tenant_code
+
+    base_url = str(request.base_url).rstrip("/")
+    public_url = _public_article_url(base_url, tenant_code_for_path, article.slug)
+
+    return PublishActionResponse(
+        id=article.id,
+        is_published=article.is_published,
+        public_url=public_url,
+    )
+
 
 
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])

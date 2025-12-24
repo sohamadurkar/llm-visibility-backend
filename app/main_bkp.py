@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, HttpUrl, EmailStr
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, and_, func, case
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from urllib.parse import urlparse
@@ -157,6 +157,7 @@ def provision_new_tenant(
     - schema: tenant_<code>
     - all tables in that schema (using Base.metadata)
     - an admin user in that schema
+    - ✅ runs one-time tenant migration(s) (Option A)
 
     Returns the schema name.
     """
@@ -191,6 +192,17 @@ def provision_new_tenant(
 
         # Create all tables defined on Base in this schema
         Base.metadata.create_all(bind=conn)
+
+        # ✅ Option A: run tenant migration ONCE during provisioning
+        # Ensure angle_label exists in this tenant schema
+        conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS content_articles
+                ADD COLUMN IF NOT EXISTS angle_label VARCHAR
+                """
+            )
+        )
 
         # Insert the initial admin user into this tenant's users table
         conn.execute(
@@ -318,25 +330,15 @@ def get_db(request: Request):
         # Ensure the schema already exists (cached; no auto-creation here)
         _ensure_tenant_schema(schema)
 
-        # ✅ UPDATED: safe schema quoting + include public fallback
+        # ✅ safe schema quoting + include public fallback
         qschema = _quote_ident(schema)
         db.execute(text(f"SET search_path TO {qschema}, public"))
 
-        # 🔹 Lightweight migration: make sure angle_label exists in this schema too
-        try:
-            db.execute(
-                text(
-                    """
-                    ALTER TABLE IF EXISTS content_articles
-                    ADD COLUMN IF NOT EXISTS angle_label VARCHAR
-                    """
-                )
-            )
-        except Exception:
-            # Don't break requests if migration fails for some reason
-            pass
-
         yield db
+    except Exception:
+        # important to free the connection cleanly if an error happens mid-request
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -347,7 +349,7 @@ def on_startup():
     # Base public schema – useful for default/demo tenant
     Base.metadata.create_all(bind=engine)
 
-    # 🔹 Ensure new angle_label column exists on public.content_articles
+    # 🔹 Ensure angle_label column exists on public.content_articles
     from sqlalchemy import text as _text
     with engine.begin() as conn:
         conn.execute(
@@ -587,7 +589,6 @@ class ClientRegistrationResponse(BaseModel):
 
 # ----- Behaviour classifier for prompts -----
 
-
 def classify_prompt_behaviour(text: str) -> str:
     """
     Heuristic classifier that assigns a behaviour label to a prompt
@@ -674,7 +675,6 @@ def _article_slug(product_id: int, angle_key: str) -> str:
 
 
 # ----- Auth helpers (dependencies) -----
-
 
 def get_current_user(
     request: Request,
@@ -2187,14 +2187,10 @@ async def generate_product_articles(
 @app.get("/prompt-stats/{pack_id}", response_model=List[PromptPerformance])
 def prompt_stats(
     pack_id: str,
-    batch_id: Optional[str] = None,  # NEW
+    batch_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Returns per-prompt performance for a given pack_id (pack_key).
-    If batch_id is provided, stats are restricted to that batch only.
-    """
     db_pack = (
         db.query(PromptPack)
         .filter(PromptPack.pack_key == pack_id)
@@ -2203,31 +2199,42 @@ def prompt_stats(
     if not db_pack:
         raise HTTPException(status_code=404, detail="Prompt pack not found in DB")
 
-    prompts = (
-        db.query(Prompt)
+    # Build an OUTER JOIN so prompts with zero tests still return
+    join_cond = (LLMTest.prompt_id == Prompt.id)
+    if batch_id:
+        join_cond = and_(join_cond, LLMTest.batch_id == batch_id)
+
+    rows = (
+        db.query(
+            Prompt.id.label("prompt_id"),
+            Prompt.index.label("index"),
+            Prompt.text.label("text"),
+            func.count(LLMTest.id).label("total_runs"),
+            func.coalesce(
+                func.sum(
+                    case((LLMTest.appeared == True, 1), else_=0)
+                ),
+                0,
+            ).label("appeared_count"),
+        )
+        .outerjoin(LLMTest, join_cond)
         .filter(Prompt.pack_id == db_pack.id)
+        .group_by(Prompt.id, Prompt.index, Prompt.text)
         .order_by(Prompt.index)
         .all()
     )
 
     results: List[PromptPerformance] = []
-
-    for prompt in prompts:
-        q = db.query(LLMTest).filter(LLMTest.prompt_id == prompt.id)
-
-        if batch_id:
-            q = q.filter(LLMTest.batch_id == batch_id)
-
-        tests = q.all()
-        total_runs = len(tests)
-        appeared_count = sum(1 for t in tests if t.appeared)
+    for r in rows:
+        total_runs = int(r.total_runs or 0)
+        appeared_count = int(r.appeared_count or 0)
         visibility_score = (appeared_count / total_runs) if total_runs > 0 else 0.0
 
         results.append(
             PromptPerformance(
-                prompt_id=prompt.id,
-                index=prompt.index,
-                text=prompt.text,
+                prompt_id=r.prompt_id,
+                index=r.index,
+                text=r.text,
                 total_runs=total_runs,
                 appeared_count=appeared_count,
                 visibility_score=visibility_score,
