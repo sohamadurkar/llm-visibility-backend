@@ -2349,27 +2349,32 @@ def publish_article(
 @app.post("/articles/{article_id}/unpublish", response_model=PublishActionResponse)
 def unpublish_article(
     article_id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    tenant: str = Depends(get_tenant),  # <- keep whatever tenant dependency you use
+    current_user: User = Depends(get_current_user),
 ):
-    # IMPORTANT: use your existing "get tenant session/db" pattern if different.
-    # If your app uses schema switching, this should already be handled by get_db/get_tenant.
-
-    article = db.query(ContentArticle).filter(ContentArticle.id == article_id).first()
+    article = db.query(ContentArticle).filter(ContentArticle.id == article_id).one_or_none()
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
 
-    # Idempotent: if already draft, just return
     article.is_published = False
-    article.updated_at = datetime.utcnow()
-
     db.commit()
     db.refresh(article)
+
+    tenant_raw = request.headers.get(TENANT_HEADER) or ""
+    tenant_code = tenant_raw.strip().lower() or "public"
+    if tenant_code.startswith("tenant_"):
+        tenant_code_for_path = tenant_code[len("tenant_"):]
+    else:
+        tenant_code_for_path = tenant_code
+
+    base_url = str(request.base_url).rstrip("/")
+    public_url = _public_article_url(base_url, tenant_code_for_path, article.slug)
 
     return PublishActionResponse(
         id=article.id,
         is_published=article.is_published,
-        public_url=article.public_url,
+        public_url=public_url,
     )
 
 
