@@ -18,6 +18,7 @@ import threading
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from starlette.concurrency import run_in_threadpool  # ✅ NEW
 
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
@@ -1762,7 +1763,9 @@ async def visibility_report(
     snapshot = build_page_snapshot(html)
 
     try:
-        report_md = generate_visibility_report_markdown(
+        # ✅ Run blocking OpenAI call in threadpool
+        report_md = await run_in_threadpool(
+            generate_visibility_report_markdown,
             product_title=product.title or product.url,
             product_url=product.url,
             domain=domain,
@@ -1842,7 +1845,9 @@ async def batch_competitor_report(
     model_to_use = payload.model or DEFAULT_REPORT_MODEL
 
     try:
-        report_md = generate_competitor_report_markdown_for_batch(
+        # ✅ Run blocking OpenAI call in threadpool
+        report_md = await run_in_threadpool(
+            generate_competitor_report_markdown_for_batch,
             product=product,
             pack=pack,
             tests=tests,
@@ -2141,7 +2146,9 @@ async def generate_product_articles(
 
     # 🔹 Ask LLM for product-specific labels for all 10 canonical angles
     # (or at least the ones we'll use; we still call once and then subset)
-    dynamic_labels = generate_dynamic_angle_labels_for_product(
+    # ✅ Run blocking OpenAI call in threadpool
+    dynamic_labels = await run_in_threadpool(
+        generate_dynamic_angle_labels_for_product,
         product_title=product.title or product.url,
         product_url=product.url,
         domain=domain,
@@ -2167,7 +2174,9 @@ async def generate_product_articles(
         # Use dynamic per-product label if available; fall back to canonical
         angle_label = dynamic_labels.get(angle_key) or ARTICLE_ANGLES[angle_key]
 
-        article_data = generate_article_html_for_angle(
+        # ✅ Run blocking OpenAI call in threadpool
+        article_data = await run_in_threadpool(
+            generate_article_html_for_angle,
             product_title=product.title or product.url,
             product_url=product.url,
             domain=domain,

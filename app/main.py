@@ -66,6 +66,9 @@ from app.services.content_generator import (
     generate_article_html_for_angle,
     generate_dynamic_angle_labels_for_product,  # NEW
 )
+from app.services.content_plan_report import (
+    generate_content_plan_markdown,  # NEW
+)
 
 load_dotenv()
 
@@ -493,6 +496,19 @@ class VisibilityReportResponse(BaseModel):
     product_id: int
     model_used: str
     report_markdown: str
+    file_path: str
+    download_url: str
+
+
+class ContentPlanRequest(BaseModel):
+    product_id: int
+    model: Optional[str] = DEFAULT_REPORT_MODEL
+
+
+class ContentPlanResponse(BaseModel):
+    product_id: int
+    model_used: str
+    plan_markdown: str
     file_path: str
     download_url: str
 
@@ -1789,6 +1805,69 @@ async def visibility_report(
         product_id=product.id,
         model_used=payload.model,
         report_markdown=report_md,
+        file_path=file_path,
+        download_url=download_url,
+    )
+
+
+@app.post("/content-plan-report", response_model=ContentPlanResponse)
+async def content_plan_report(
+    payload: ContentPlanRequest,
+    db: Session = Depends(get_db),
+    request: Request = None,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Generate a CONTENT PLAN for ONE very strong long-form article about the product.
+    This does NOT write the article itself – it outputs a structured plan in Markdown.
+    """
+    product = db.query(Product).filter(Product.id == payload.product_id).one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    parsed = urlparse(product.url)
+    domain = parsed.netloc
+
+    # Try to get page snapshot (same pattern as visibility_report)
+    try:
+        html = await fetch_page_html_via_scraperapi(product.url)
+        snapshot = build_page_snapshot(html)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error fetching page HTML: {e}")
+
+    # Run blocking OpenAI call in a threadpool (like we did for other reports)
+    try:
+        plan_md = await run_in_threadpool(
+            generate_content_plan_markdown,
+            product_title=product.title or product.url,
+            product_url=product.url,
+            domain=domain,
+            has_product_jsonld=product.has_product_jsonld,
+            page_snapshot=snapshot,
+            model=payload.model,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating content plan: {e}",
+        )
+
+    # Reuse the same markdown save mechanism as other reports
+    try:
+        file_path = save_report_markdown_to_file(product.id, plan_md)
+        base_url = str(request.base_url).rstrip("/")
+        filename = os.path.basename(file_path)
+        download_url = f"{base_url}/download/report/{filename}"
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error saving content plan: {e}",
+        )
+
+    return ContentPlanResponse(
+        product_id=product.id,
+        model_used=payload.model,
+        plan_markdown=plan_md,
         file_path=file_path,
         download_url=download_url,
     )
