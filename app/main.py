@@ -375,9 +375,10 @@ def on_startup():
     # Base public schema – useful for default/demo tenant
     Base.metadata.create_all(bind=engine)
 
-    # 🔹 Ensure angle_label column exists on public.content_articles
     from sqlalchemy import text as _text
+
     with engine.begin() as conn:
+        # 🔹 Ensure angle_label column exists on public.content_articles
         conn.execute(
             _text(
                 """
@@ -386,13 +387,30 @@ def on_startup():
                 """
             )
         )
+
         # 🔹 Ensure email verification fields exist on public.users
+        # is_email_verified default TRUE for now so existing users aren't blocked.
         conn.execute(
             _text(
                 """
                 ALTER TABLE IF EXISTS users
-                ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN NOT NULL DEFAULT TRUE,
+                ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN NOT NULL DEFAULT TRUE
+                """
+            )
+        )
+        conn.execute(
+            _text(
+                """
+                ALTER TABLE IF EXISTS users
                 ADD COLUMN IF NOT EXISTS email_verification_token VARCHAR
+                """
+            )
+        )
+        conn.execute(
+            _text(
+                """
+                ALTER TABLE IF EXISTS users
+                ADD COLUMN IF NOT EXISTS email_verification_sent_at TIMESTAMPTZ
                 """
             )
         )
