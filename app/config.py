@@ -20,3 +20,7 @@ DEFAULT_REPORT_MODEL = os.getenv("DEFAULT_REPORT_MODEL", "gpt-5.1")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change_me_in_env")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+
+# ----- NEW: Email settings -----
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "soham@neuracite.com")

@@ -19,5 +19,10 @@ class User(Base):
 
     is_active = Column(Boolean, default=True)
     is_admin = Column(Boolean, default=False)
+   
+    # NEW: email verification fields
+    is_email_verified = Column(Boolean, default=False)
+    email_verification_token = Column(String, nullable=True, index=True)
+    email_verification_sent_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)

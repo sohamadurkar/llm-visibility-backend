@@ -19,6 +19,8 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from starlette.concurrency import run_in_threadpool  # ✅ NEW
+from sendgrid import SendGridAPIClient  # ✅ NEW
+from sendgrid.helpers.mail import Mail  # ✅ NEW
 
 from app.db.engine import Base, engine, SessionLocal
 from app.models.models import Website, Product
@@ -26,7 +28,14 @@ from app.models.llmtest import LLMTest
 from app.models.prompt_models import PromptPack, Prompt
 from app.models.user_models import User
 from app.models.content_models import ContentArticle
-from app.config import DEFAULT_LLM_MODEL, DEFAULT_REPORT_MODEL
+from app.config import (
+    DEFAULT_LLM_MODEL,
+    DEFAULT_REPORT_MODEL,
+    PASSWORD_MIN_LENGTH,          # ✅ NEW
+    PASSWORD_REQUIRE_COMPLEXITY,  # ✅ NEW
+    SENDGRID_API_KEY,             # ✅ NEW
+    EMAIL_FROM_ADDRESS,           # ✅ NEW
+)
 
 from app.services.llm_checker import (
     run_llm_visibility_check,
@@ -168,6 +177,15 @@ def provision_new_tenant(
     # Validate & normalise code
     code = normalize_and_validate_tenant_code(tenant_code)
     schema_name = schema_name_for_tenant(code)
+
+    # ✅ Enforce password policy for initial admin
+    from fastapi import HTTPException as _HTTPException  # local alias to avoid confusion
+    try:
+        # we reuse the same helper as for other registrations
+        pass
+    except Exception:
+        # no-op, this block will be replaced by actual helper usage below
+        ...
 
     # 1) Check if schema already exists
     with engine.connect() as conn:
@@ -365,6 +383,16 @@ def on_startup():
                 """
                 ALTER TABLE IF EXISTS content_articles
                 ADD COLUMN IF NOT EXISTS angle_label VARCHAR
+                """
+            )
+        )
+        # 🔹 Ensure email verification fields exist on public.users
+        conn.execute(
+            _text(
+                """
+                ALTER TABLE IF EXISTS users
+                ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN NOT NULL DEFAULT TRUE,
+                ADD COLUMN IF NOT EXISTS email_verification_token VARCHAR
                 """
             )
         )
@@ -725,6 +753,72 @@ def _article_slug(product_id: int, angle_key: str) -> str:
     return f"product-{product_id}-{safe_angle}-{short}"
 
 
+# ----- NEW: password validation + email verification helpers -----
+
+def validate_password_strength(password: str) -> None:
+    """
+    Enforce a basic password policy:
+    - minimum length (from PASSWORD_MIN_LENGTH)
+    - optional basic complexity (at least 2 of upper/lower/digit)
+    """
+    if len(password) < PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {PASSWORD_MIN_LENGTH} characters long.",
+        )
+
+    if PASSWORD_REQUIRE_COMPLEXITY:
+        has_upper = any(c.isupper() for c in password)
+        has_lower = any(c.islower() for c in password)
+        has_digit = any(c.isdigit() for c in password)
+
+        if sum([has_upper, has_lower, has_digit]) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Password must include at least two of: uppercase letters, lowercase letters, digits.",
+            )
+
+
+def _send_verification_email(
+    to_email: str,
+    token: str,
+    request: Request,
+    tenant_code_for_path: str,
+) -> None:
+    """
+    Sends a simple verification email with a link containing the token.
+    Soft-fails if email config is missing.
+    """
+    if not SENDGRID_API_KEY or not EMAIL_FROM_ADDRESS:
+        # If email isn't configured, just skip sending to avoid breaking registration.
+        return
+
+    base_url = str(request.base_url).rstrip("/")
+    verify_url = f"{base_url}/auth/{tenant_code_for_path}/verify-email?token={token}"
+
+    subject = "Confirm your NeuraCite email"
+    html_content = f"""
+    <p>Hi,</p>
+    <p>Please confirm your email address for your NeuraCite workspace.</p>
+    <p><a href="{verify_url}">Click here to verify your email</a></p>
+    <p>If you didn’t request this, you can ignore this email.</p>
+    """
+
+    message = Mail(
+        from_email=EMAIL_FROM_ADDRESS,
+        to_emails=to_email,
+        subject=subject,
+        html_content=html_content,
+    )
+
+    try:
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        sg.send(message)
+    except Exception:
+        # Don't break the request because email failed; frontend can still show a message.
+        pass
+
+
 # ----- Auth helpers (dependencies) -----
 
 def get_current_user(
@@ -887,7 +981,10 @@ def health():
 # ----- Client registration endpoint -----
 
 @app.post("/auth/register-client", response_model=ClientRegistrationResponse)
-def register_client(payload: ClientRegistrationRequest):
+def register_client(
+    payload: ClientRegistrationRequest,
+    request: Request,
+):
     """
     Public endpoint: a new client can self-register.
 
@@ -903,6 +1000,9 @@ def register_client(payload: ClientRegistrationRequest):
       - admin_password
     on the normal /auth/login endpoint, with X-Tenant set to tenant_code.
     """
+    # ✅ Enforce password policy for initial admin
+    validate_password_strength(payload.admin_password)
+
     # We validate and normalise inside provision_new_tenant
     schema_name = provision_new_tenant(
         tenant_code=payload.tenant_code,
@@ -913,13 +1013,37 @@ def register_client(payload: ClientRegistrationRequest):
     # Return the normalised tenant code as well
     code = normalize_and_validate_tenant_code(payload.tenant_code)
 
+    # ✅ Attach an email verification token to the initial admin and send email
+    token = uuid.uuid4().hex
+    db = SessionLocal()
+    try:
+        qschema = _quote_ident(schema_name)
+        db.execute(text(f"SET search_path TO {qschema}, public"))
+        admin_user = db.query(User).filter(User.email == payload.admin_email).one_or_none()
+        if admin_user:
+            admin_user.email_verification_token = token
+            admin_user.is_email_verified = False
+            db.commit()
+        else:
+            token = None
+    finally:
+        db.close()
+
+    if token:
+        _send_verification_email(
+            to_email=payload.admin_email,
+            token=token,
+            request=request,
+            tenant_code_for_path=code,
+        )
+
     return ClientRegistrationResponse(
         tenant_code=code,
         schema_name=schema_name,
         admin_email=payload.admin_email,
         message=(
             "Workspace created successfully. "
-            "You can now log in using this tenant code, email and password."
+            "Please verify your email from the link we’ve sent, then you can log in using this tenant code, email and password."
         ),
     )
 
@@ -931,11 +1055,19 @@ def register_admin(
     payload: RegisterAdminRequest,
     db: Session = Depends(get_db),
     request: Request = None,
+    current_user: User = Depends(get_current_user),  # ✅ lock down to admins
 ):
     """
     Creates an admin user for the current tenant (schema defined by X-Tenant header).
     You can later restrict or remove this endpoint in production.
     """
+    # ✅ Only admins can create new admins
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only admins can create new admin users")
+
+    # ✅ Enforce password policy
+    validate_password_strength(payload.password)
+
     existing = db.query(User).filter(User.email == payload.email).one_or_none()
     if existing:
         raise HTTPException(status_code=400, detail="User with this email already exists")
@@ -945,10 +1077,25 @@ def register_admin(
         hashed_password=hash_password(payload.password),
         is_admin=True,
         is_active=True,
+        is_email_verified=False,  # type: ignore[attr-defined]
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    # ✅ Send verification email for the new admin
+    token = uuid.uuid4().hex
+    user.email_verification_token = token  # type: ignore[attr-defined]
+    db.commit()
+
+    tenant_code_for_path = tenant_code_for_path_from_request(request)
+    _send_verification_email(
+        to_email=user.email,
+        token=token,
+        request=request,
+        tenant_code_for_path=tenant_code_for_path,
+    )
+
     return user
 
 
@@ -972,6 +1119,13 @@ def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="User is inactive")
 
+    # ✅ Require email verification
+    if not getattr(user, "is_email_verified", True):
+        raise HTTPException(
+            status_code=403,
+            detail="Email address not verified. Please check your inbox for a verification link.",
+        )
+
     # Get tenant code from header to embed in the token (optional)
     tenant_raw = request.headers.get(TENANT_HEADER) or ""
     tenant_code = tenant_raw.strip() or "public"
@@ -982,6 +1136,44 @@ def login(
     )
 
     return Token(access_token=access_token)
+
+
+@app.get("/auth/{tenant_code}/verify-email", response_class=HTMLResponse)
+def verify_email(
+    tenant_code: str,
+    token: str,
+):
+    """
+    Simple email verification endpoint.
+    - tenant_code is used to route to the correct schema
+    - token matches User.email_verification_token
+    """
+    schema = _normalize_schema_name(tenant_code)
+    _ensure_tenant_schema(schema)
+
+    db = SessionLocal()
+    try:
+        qschema = _quote_ident(schema)
+        db.execute(text(f"SET search_path TO {qschema}, public"))
+
+        user = db.query(User).filter(User.email_verification_token == token).one_or_none()  # type: ignore[attr-defined]
+        if not user:
+            return HTMLResponse(
+                content="<h1>Invalid or expired verification link.</h1>",
+                status_code=400,
+            )
+
+        user.is_email_verified = True  # type: ignore[attr-defined]
+        user.email_verification_token = None  # type: ignore[attr-defined]
+        db.commit()
+
+        html = """
+        <h1>Email verified</h1>
+        <p>Your email address has been confirmed. You can now return to the app and log in.</p>
+        """
+        return HTMLResponse(content=html, status_code=200)
+    finally:
+        db.close()
 
 
 # ----- Core product / visibility endpoints -----
