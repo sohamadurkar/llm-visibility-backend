@@ -24,3 +24,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60")
 # ----- NEW: Email settings -----
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "soham@neuracite.com")
+
+#  Password policy
+PASSWORD_MIN_LENGTH = int(os.getenv("PASSWORD_MIN_LENGTH", "8"))

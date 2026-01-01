@@ -18,7 +18,7 @@ import threading
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from starlette.concurrency import run_in_threadpool  # ✅ NEW
+from starlette.concurrency import run_in_threadpool  #  ✅ NEW
 from sendgrid import SendGridAPIClient  # ✅ NEW
 from sendgrid.helpers.mail import Mail  # ✅ NEW
 
