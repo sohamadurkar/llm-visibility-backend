@@ -388,8 +388,7 @@ def on_startup():
             )
         )
 
-        # 🔹 Ensure email verification fields exist on public.users
-        # is_email_verified default TRUE for now so existing users aren't blocked.
+        # 🔹 Ensure email verification fields exist on public.users (public schema)
         conn.execute(
             _text(
                 """
@@ -414,6 +413,48 @@ def on_startup():
                 """
             )
         )
+
+        # 🔹 NEW: ensure the same email verification fields exist on ALL tenant_* schemas
+        result = conn.execute(
+            _text(
+                """
+                SELECT schema_name
+                FROM information_schema.schemata
+                WHERE schema_name LIKE 'tenant_%'
+                """
+            )
+        )
+
+        tenant_schemas = [row[0] for row in result]
+
+        for schema in tenant_schemas:
+            # reuse the existing safe identifier helper
+            qschema = _quote_ident(schema)
+
+            conn.execute(
+                _text(
+                    f"""
+                    ALTER TABLE IF EXISTS {qschema}.users
+                    ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN NOT NULL DEFAULT TRUE
+                    """
+                )
+            )
+            conn.execute(
+                _text(
+                    f"""
+                    ALTER TABLE IF EXISTS {qschema}.users
+                    ADD COLUMN IF NOT EXISTS email_verification_token VARCHAR
+                    """
+                )
+            )
+            conn.execute(
+                _text(
+                    f"""
+                    ALTER TABLE IF EXISTS {qschema}.users
+                    ADD COLUMN IF NOT EXISTS email_verification_sent_at TIMESTAMPTZ
+                    """
+                )
+            )
 
 
 # --- Schemas (Pydantic models) ---
