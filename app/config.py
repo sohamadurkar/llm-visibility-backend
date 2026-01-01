@@ -27,3 +27,9 @@ EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "soham@neuracite.com")
 
 #  Password policy
 PASSWORD_MIN_LENGTH = int(os.getenv("PASSWORD_MIN_LENGTH", "8"))
+
+# Enable/disable complexity rules via env if you want
+# e.g. PASSWORD_REQUIRE_COMPLEXITY=false in Railway to relax it
+PASSWORD_REQUIRE_COMPLEXITY = (
+    os.getenv("PASSWORD_REQUIRE_COMPLEXITY", "true").lower() == "true"
+)
